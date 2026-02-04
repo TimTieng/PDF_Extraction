@@ -1,221 +1,164 @@
-# TableHelper.py
+"""
+CREATED: 30 JAN 2026
+AUTHOR: @GAMBIT
+JIRA TICKET: TBD
 
-from __future__ import annotations
+PURPOSE:
+    The TableHelper Class will contain several methods and helper functions to assist in structuring and formatting table content 
+    found within the Chile Budget PDF document 
+    
+DATA SOURCE:
+    1. Ley de Presupuestos ano 2025 para el sector publico: "Chile total budget_articles-363446_doc_pdf.pdf"
 
-import re
-from typing import Any, Dict, List, Optional, Tuple, Union
+TYPE OF SCRIPT: SUPPORT SCRIPT
 
+EXECUTION:
+    This is a non executable script. 
+    
+NOTES:
+    1. Current  pdf_extract reads in the ENTIRE pdf page. It may be easier to ingest logical sections of the page from my pov
+    2. adding pyright: ignore[reportPrivateImportUsage]
+    
+CONCEPTUAL PROCESS:
+    1. Ingest content of the pdf document in logical sections/groups based on the content of each page:
+        - Main Report Header
+        - Side Report Header in NE Corner of PDF
+        - Financial Tables
+        - Glosas pages which comes after the pdf tables page
+"""
+# Adding for read_pdf privatimportusage warning
+# pyright: reportPrivateImportUsage=false
+
+# Standard Imports
 import camelot
+from typing import Any, Optional, List, Dict, Union
+import re
 
-HeaderValue = Union[str, List[str], int, None]
+# Specialty/Custom Libraries
 
+HeaderValue = Union[str,List[str], int, None]
 
 class TableHelper:
     """
-    Utility class for extracting Chile budget PDF header values using Camelot.
-
-    This helper focuses on extracting:
-      - Main report headers (top-center block):
-          ministry, service_component, sub_component, raw_main_header_lines
-      - Side report headers (top-right grey box):
-          partida, capitulo, programa, raw_side_header_lines
-      - A combined per-page merge of both.
+    Class that will have several methods designed to help structuring of table content found in the chile budget pdf file
     """
-
-    # ---------------------------
-    # Core text normalization
-    # ---------------------------
-
-    def _normalize_whitespace(self, s: str) -> str:
+    # ---------- HELPER FUNCTION SECTION  ----------
+    def _is_side_header_cell(self, s:str)-> bool:
         """
-        PURPOSE:
-            Normalizes whitespace so regex matching and comparisons are consistent.
-
-        RETURNS:
-            A trimmed string with collapsed internal whitespace.
-        """
-        return re.sub(r"\s+", " ", (s or "").strip())
-
-    def _clean_header_artifacts(self, s: str) -> str:
-        """
-        PURPOSE:
-            Cleans small extraction artifacts that appear in header lines.
-
-        SCENARIOS THIS HELPS:
-            - Camelot sometimes introduces stray quotes or splits punctuation oddly, e.g.
-              "..., 10, 11,'" or a next-line starting with "'12, 13, ..."
-            - Smart cleanup helps preserve the intended meaning:
-              "..., 10, 11, 12, 13, ..."
-
-        RETURNS:
-            Cleaned header string (still human-readable, no aggressive rewriting).
-        """
-        if not s:
-            return ""
-
-        out = s
-
-        # Normalize curly quotes to straight quotes
-        out = out.replace("“", '"').replace("”", '"').replace("’", "'").replace("‘", "'")
-
-        # Remove leading/trailing standalone quotes
-        out = re.sub(r"^\s*'+\s*", "", out)
-        out = re.sub(r"\s*'+\s*$", "", out)
-
-        # Fix digit followed by a stray quote: 11' -> 11
-        out = re.sub(r"(\d)\s*'\s*(?=[,)\s])", r"\1", out)
-
-        # Fix quote that precedes digits: '12 -> 12
-        out = re.sub(r"'\s*(\d)", r"\1", out)
-
-        # Normalize double commas/spaces
-        out = re.sub(r"\s*,\s*", ", ", out)
-        out = re.sub(r"\s+", " ", out).strip()
-
-        return out
-
-    def _clean_lines(self, text: str) -> List[str]:
-        """
-        PURPOSE:
-            Cleans extracted text by splitting into lines, collapsing whitespace,
-            removing empties, and applying minor artifact cleanup.
-
-        RETURNS:
-            List of clean, non-empty header lines.
-        """
-        out: List[str] = []
-        for raw in (text or "").splitlines():
-            s = self._normalize_whitespace(raw)
-            s = self._clean_header_artifacts(s)
-            if s:
-                out.append(s)
-        return out
-
-    # ---------------------------
-    # Camelot table -> lines
-    # ---------------------------
-
-    def _join_cells_smart(self, cells: List[str]) -> str:
-        """
-        PURPOSE:
-            Camelot sometimes returns header words split into single-character cells
-            (e.g., ['S','u','b','s','e','c',...]).
-            If we always do " ".join(cells), that becomes "S u b s e c ...".
-
-            This function detects that scenario and joins WITHOUT spaces.
-            Otherwise, it joins with spaces like normal text.
-
-        SCENARIO THIS FIXES:
-            Pages where the main header (especially sub_component lines like
-            "Subsecretaría para las Fuerzas Armadas (01, 02, ...)")
-            is extracted as one letter per cell due to Camelot grid segmentation.
-
-        RETURNS:
-            One reconstructed line of text.
-        """
-        toks: List[str] = []
-        for c in cells:
-            if c is None:
-                continue
-            t = str(c).strip()
-            if not t or t.lower() == "nan":
-                continue
-            toks.append(t)
-
-        if not toks:
-            return ""
-
-        # Heuristic: if most tokens are single letters, it's a "spaced letters" case
-        single_letters = sum(1 for t in toks if len(t) == 1 and t.isalpha())
-        if len(toks) >= 8 and (single_letters / len(toks)) >= 0.6:
-            return "".join(toks)
-
-        return " ".join(toks)
-
-    def _is_side_header_cell(self, s: str) -> bool:
-        """
-        PURPOSE:
-            Identifies whether a cell is clearly part of the SIDE header labels,
-            so we can optionally drop them when extracting MAIN header blocks.
-
-        SCENARIO THIS HELPS:
-            When Camelot includes the "PARTIDA / CAPÍTULO / PROGRAMA" grey-box labels
-            inside the same grid extraction area as the main header.
-
-        RETURNS:
-            True if the cell matches a side-header label pattern.
+        Docstring for _is_side_header_cell
+        
+        :param self: Description
+        :param s: Description
+        :type s: str
+        :return: Description
+        :rtype: bool
         """
         if not s:
             return False
+        
+        t = self._normalize_whitespace(str(s)).strip()
+        
+        # Updates to fix  FACH Programa Fidae (o1) bug on pdf page 556
+        return bool(re.fullmatch(r"\b(PARTIDA|CAP[IÍ]TULO|PROGRAMA)\s*:?", t, flags=re.IGNORECASE))
 
-        t = self._normalize_whitespace(str(s))
 
-        # Only treat as side-header label if it looks like a LABEL (often appears as "PROGRAMA : 01")
-        # This avoids incorrectly treating "Programa Fidae (01)" as a side-header label.
-        return bool(re.search(r"\b(PARTIDA|CAP[IÍ]TULO|PROGRAMA)\b\s*[:]", t, flags=re.IGNORECASE))
-
-    def _lines_from_camelot_df(self, df, *, drop_side_header: bool = True) -> List[str]:
+    def _lines_from_camelot_df(self, df, *, drop_side_header:bool = True) -> List[str]:
         """
         PURPOSE:
             Converts Camelot's extracted grid DataFrame into a list of readable text lines.
-            This lets us treat the header area like lines of text instead of table cells.
-
-        KEY BEHAVIOR:
-            - Uses a SMART join that prevents the "S u b s e c ..." spaced-letter bug.
-            - Optionally drops side-header label cells (PARTIDA/CAPÍTULO/PROGRAMA:).
-
+            This helps treat the header area like "lines of text" instead of table cells.
+ 
         PARAMETERS:
-            df: Camelot table df (strings in cells).
-            drop_side_header: If True, removes side-header label cells from line-building.
-
+            df: A pandas DataFrame returned by Camelot (t.df), containing strings.
+ 
         RETURNS:
-            List of non-empty reconstructed lines.
+            A list of non-empty text lines extracted from the grid, in reading order.
         """
+
         lines: List[str] = []
 
-        # Row-major traversal: join non-empty cells per row
+        # Row-major traversal; join non-empty cells per row
         for _, row in df.iterrows():
             cells = [str(x).strip() for x in row.tolist()]
             cells = [c for c in cells if c and c.lower() != "nan"]
 
             if drop_side_header:
+                # Only drop the label cells when we are extracting MAIN header
                 cells = [c for c in cells if not self._is_side_header_cell(c)]
 
             if not cells:
                 continue
 
-            line = self._join_cells_smart(cells)
-            line = self._normalize_whitespace(line)
-            line = self._clean_header_artifacts(line)
+            # Often header content is split across cells; join with space
+            line = " ".join(cells)
+            line = re.sub(r"\s+", " ", line).strip()
 
             if line:
                 lines.append(line)
 
         return lines
+    
+    def _clean_lines(self, text: str) -> List[str]:
+        """
+        PURPOSE:
+            Cleans extracted text by normalizing whitespace and removing empty lines.
+ 
+        PARAMETERS:
+            text: Raw text (possibly with newlines) to clean.
+ 
+        RETURNS:
+            A list of cleaned, non-empty text lines.
+        """
+        out = []
 
-    # ---------------------------
-    # Header line skipping / parsing helpers
-    # ---------------------------
+        for raw in (text or "").splitlines():
+            s = re.sub(r"\s+", " ", raw).strip()
+            if s:
+                out.append(s)
 
+        return out
+ 
+    def _find_line_index(self, lines: List[str], pattern: str) -> Optional[int]:
+        """
+        PURPOSE:
+            Finds the index of the first line that matches a given regular expression.
+ 
+        PARAMETERS:
+            - lines: List of text lines to search through.
+            - pattern: Regular expression pattern used to identify the target line.
+ 
+        RETURNS:
+            The index of the matching line if found, otherwise None.
+        """
+        rx = re.compile(pattern, re.IGNORECASE)
+
+        for i, line in enumerate(lines):
+            if rx.search(line):
+                return i
+
+        return None
+ 
     def _skip_side_header_line(self, line: str) -> bool:
         """
         PURPOSE:
-            Decides if a line should be ignored when capturing MAIN header text.
-
-        IMPORTANT:
-            We only skip PARTIDA/CAPÍTULO/PROGRAMA lines when they look like a
-            side-header label (i.e., "PROGRAMA : 01"), NOT when "Programa" appears
-            inside a main header value like "Programa Fidae (01)".
-
+            Identifies lines that should be ignored when extracting report header text.
+            Skips side-header labels and finance table column headers.
+ 
+        PARAMETERS:
+            line: A single extracted line of text.
+ 
         RETURNS:
-            True if line should be skipped from MAIN header capture.
+            True if the line should be skipped, False otherwise.
         """
-        l = self._normalize_whitespace(line)
-
-        # Skip only label-style side header lines
-        if re.search(r"\b(PARTIDA|CAP[IÍ]TULO|PROGRAMA)\b\s*[:]", l, re.IGNORECASE):
+        l = line.strip()
+ 
+        # DEBUG ADDITION
+        if not l:
             return True
-
+        # Only skip the SIDE HEADER SICTION , NOT PROGRAMA FIDAE (01) for FACH
+        if re.match(r"\b(PARTIDA|CAP[IÍ]TULO|PROGRAMA)\s*[:\-]?\s*\d+\s*$", l, re.IGNORECASE):
+            return True
+        
         # Skip table column headers
         if re.search(
             r"\b(Sub[-\s]?T[íi]tulo|Item|Asig\.?|Asignaci[oó]n|Denominaciones|Glosa|Moneda|Miles de)\b",
@@ -223,61 +166,36 @@ class TableHelper:
             re.IGNORECASE,
         ):
             return True
-
-        # Skip lines that are only small numbers (common when Camelot picks up table index values)
         if re.fullmatch(r"\d{1,4}", l):
             return True
-
         return False
 
-    # Backward-compatible alias if you previously used _skip_header_line name
-    def _skip_header_line(self, line: str) -> bool:
-        """
-        PURPOSE:
-            Backward-compatible alias for _skip_side_header_line.
-
-        RETURNS:
-            True if line should be skipped from MAIN header capture.
-        """
-        return self._skip_side_header_line(line)
-
-    def _find_line_index(self, lines: List[str], pattern: str) -> Optional[int]:
-        """
-        PURPOSE:
-            Finds the index of the first line that matches a regex pattern.
-
-        RETURNS:
-            Index if found, otherwise None.
-        """
-        rx = re.compile(pattern, re.IGNORECASE)
-        for i, line in enumerate(lines):
-            if rx.search(line):
-                return i
-        return None
 
     def _fallback_find_ministry(self, head: List[str]) -> Optional[str]:
         """
         PURPOSE:
-            Fallback ministry detection if the exact MINISTERIO line isn't found.
-
-        SCENARIO THIS HELPS:
-            Camelot sometimes slightly changes the ministry line (extra spacing,
-            partial extraction). This tries to pick the best candidate line.
-
+            Attempts to identify the ministry line if it is not cleanly detected.
+            Uses alternative heuristics like finding 'MINISTERIO' anywhere or
+            selecting an uppercase-heavy line near the top.
+ 
+        PARAMETERS:
+            head: Cleaned lines from the header extraction region.
+ 
         RETURNS:
-            A best-guess ministry line, or None.
+            A best-guess ministry line if found, otherwise None.
         """
+
         for line in head:
             if re.search(r"\bMINISTERIO\b", line, re.IGNORECASE):
                 return line
-
+            
         best = None
         best_score = 0.0
 
         for line in head[:15]:
             if self._skip_side_header_line(line):
                 continue
-            letters = re.sub(r"[^A-Za-zÁÉÍÓÚÑáéíóúñ]", "", line)
+            letters = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", "", line)
             if len(letters) < 8:
                 continue
             upper = sum(1 for c in letters if c.isupper())
@@ -285,64 +203,117 @@ class TableHelper:
             if score > best_score and len(line) >= 10:
                 best = line
                 best_score = score
-
         return best
 
+    
+    def _normalize_whitespace(self, s: str) -> str:
+        """
+        PURPOSE:
+        Normalizes whitespace so regex matching works consistently.
+ 
+        PARAMETERS:
+        s: Input string.
+ 
+        RETURNS:
+        A string with collapsed spaces and trimmed ends.
+        """
+        return re.sub(r"\s+", " ", (s or "").strip())
+ 
     def _extract_labeled_value(self, text: str, label_pattern: str) -> Optional[str]:
         """
         PURPOSE:
-            Extracts a numeric value that appears after a label like PARTIDA/CAPÍTULO/PROGRAMA.
-
-        MATCHES FORMATS LIKE:
-            - PARTIDA : 11
-            - PARTIDA:11
-            - PARTIDA 11
-
+        Extracts a numeric value that appears after a label like PARTIDA/CAPÍTULO/PROGRAMA.
+ 
+        PARAMETERS:
+        text: Text blob to search.
+        label_pattern: Regex pattern for the label (e.g., r"\\bPARTIDA\\b").
+ 
         RETURNS:
-            A zero-padded 2-digit string when appropriate, else raw numeric string.
-            Returns None if not found.
+        The extracted numeric value as a string, zero-padded to 2 digits when appropriate,
+        or None if not found.
         """
         if not text:
             return None
-
+ 
+        # Match formats like:
+        # PARTIDA : 11
+        # PARTIDA:11
+        # PARTIDA 11
         rx = re.compile(label_pattern + r"\s*[:\-]?\s*([0-9]{1,3})", re.IGNORECASE)
         m = rx.search(text)
         if not m:
             return None
-
+ 
         val = m.group(1)
+        # Most are 2-digit (01, 11, 19). Keep 3-digit as-is.
         return val.zfill(2) if len(val) <= 2 else val
+    
+    # Created specifically for PDF Page 713 Ministry of work and labor services (multi-line Ministry)
+    def _is_ministry_continuation(self, line: str) -> bool:
+        """
+        PURPOSE:
+            Decide if a header line is a continuation of the ministry name (ministry spans multiple lines).
+    
+        PARAMETERS:
+            - line: A single cleaned header line.
+    
+        RETURNS:
+            True if the line should be appended to the ministry, otherwise False.
+        """
 
+        s = (line or "").strip()
+
+        if not s:
+            return False
+    
+        # Specific logic for handleing 
+        # e.g., "Y PREVISIÓN SOCIAL"
+        if re.match(r"^(Y|E)\b", s, flags=re.IGNORECASE):
+            return True
+        return False
+ 
+ 
     def _is_service_continuation(self, line: str) -> bool:
         """
         PURPOSE:
-            Decide if a header line is a continuation of the service_component.
-
-        SCENARIO THIS RESOLVES:
-            Service components that wrap onto the next line starting with common
-            Spanish prepositions/articles, e.g.:
-                "Servicio Hidrográfico y Oceanográfico"
-                "de la Armada de Chile"
-
+            Decide if a header line is a continuation of the service_component name.
+    
+        PARAMETERS:
+            - line: A single cleaned header line.
+    
         RETURNS:
-            True if the line should be appended to service_component.
+            True if the line should be appended to the service component, otherwise False.
         """
+
         s = (line or "").strip()
+
         if not s:
             return False
+    
+        # Typical continuation lines start with lower-case Spanish prepositions/articles
+        # e.g., "de la Armada de Chile"
 
-        return bool(re.match(r"^(de|del|de la|de los|de las|la|las|los)\b", s, flags=re.IGNORECASE))
-
+        if re.match(r"^(de|del|de la|de los|de las|la|las|los)\b", s, flags=re.IGNORECASE):
+            return True
+    
+        return False
+    
+ 
     def _dedupe_preserve_order(self, lines: List[str]) -> List[str]:
         """
         PURPOSE:
-            Removes duplicate lines while preserving original order.
-
+            Remove duplicate lines while preserving original order.
+    
+        PARAMETERS:
+            - lines: List of strings.
+    
         RETURNS:
-            De-duplicated list of strings.
+            New list with duplicates removed (order preserved).
         """
         seen = set()
-        out: List[str] = []
+
+        out = []
+
         for s in lines:
             key = (s or "").strip()
             if not key:
@@ -352,72 +323,123 @@ class TableHelper:
             seen.add(key)
             out.append(key)
         return out
-
-    def _split_repeated_wrapped_header_blocks(self, captured: List[str]) -> Tuple[Optional[str], Optional[str]]:
+ 
+    # Added Specifically for Servicsion hidrografico y oceanogrico de la armada de chile
+    def _split_repeated_wrapped_header_blocks(
+        self,
+        captured: List[str],
+    ) -> tuple[Optional[str], Optional[str]]:
         """
         PURPOSE:
-            Converts 'captured' header lines into service_component and sub_component.
-
-        SCENARIOS THIS RESOLVES:
-            1) Wrapped service component lines:
-                ["Servicio Hidrográfico y Oceanográfico", "de la Armada de Chile", ...]
-               Should become:
-                service_component = "Servicio Hidrográfico y Oceanográfico de la Armada de Chile"
-
-            2) Duplicate wrapped block repeated twice due to PDF layout:
-                ["Servicio X", "de la Y", "Servicio X", "de la Y"]
-               Should become:
-                service_component = "Servicio X de la Y"
-                sub_component = None
-
-            3) Sub_component spanning multiple lines (e.g. long "(01, 02, ...)" lists)
-               Should become:
-                sub_component = "<all remainder lines joined>"
-
+            Resolves a specific PDF extraction edge case where Camelot returns
+            duplicated, wrapped header blocks for the main report header.
+    
+        SCENARIO THIS FIXES:
+        On some pages, the PDF visually contains TWO logical header fields
+        (service_component and sub_component), and EACH field wraps across
+        multiple lines. Camelot may extract them in the following order:
+            [A, B, A, B]
+    
+        Where:
+            - (A, B) is the wrapped service_component
+            - (A, B) is the wrapped sub_component (repeated verbatim)
+    
+        This helper detects repeated wrapped blocks and splits them cleanly
+        into two logical header values.
+    
+        EXAMPLE:
+            captured = [
+                "Servicio Hidrográfico y Oceanográfico",
+                "de la Armada de Chile",
+                "Servicio Hidrográfico y Oceanográfico",
+                "de la Armada de Chile",
+            ]
+    
+        If no repeated wrapped pattern is detected, the function falls back
+        to a simple positional interpretation:
+            - first ine → service_component
+            - second line → sub_component (if present)
+    
+        PARAMETERS:
+            captured:
+                Ordered list of extracted header lines following the ministry line,
+                after side-header and table-header filtering has been applied.
+    
         RETURNS:
-            (service_component, sub_component)
+            Tuple of:
+                (service_component, sub_component)
+            Each value may be None if not confidently detected.
         """
+    
+        def _norm(s: str) -> str:
+            """Normalize text for comparison (casefold + collapsed whitespace)."""
+            return self._normalize_whitespace(s or "").strip().casefold()
+    
         if not captured:
             return None, None
+        norm = [_norm(x) for x in captured if _norm(x)]
+        service_lines: List[str] = []
+        sub_lines: List[str] = []
 
-        # Clean + remove empties
-        cleaned = [self._clean_header_artifacts(self._normalize_whitespace(x)) for x in captured if self._normalize_whitespace(x)]
-        if not cleaned:
-            return None, None
+        # Detect repetition period (most common: 2-line wrap)
+        repeat_len = None
+        for k in (2, 1, 3):
+            if len(norm) >= 2 * k and norm[:k] == norm[k : 2 * k]:
+                repeat_len = k
+                break
+        if repeat_len is not None:
+            service_lines = captured[:repeat_len]
+            sub_lines = captured[repeat_len : 2 * repeat_len]
+        else:
+            service_lines = [captured[0]]
+            if len(captured) > 1:
+                sub_lines = [captured[1]]
 
-        # Detect repetition: if first half == second half, keep only first half
-        if len(cleaned) % 2 == 0:
-            half = len(cleaned) // 2
-            if cleaned[:half] == cleaned[half:]:
-                cleaned = cleaned[:half]
+        service_component = " ".join(
+            s.strip() for s in service_lines if s and s.strip()
+        ) or None
+    
+        sub_component = " ".join(
+            s.strip() for s in sub_lines if s and s.strip()
+        ) or None
+    
+        return service_component, sub_component
 
-        # De-dupe (sometimes Camelot repeats a line)
-        cleaned = self._dedupe_preserve_order(cleaned)
+    # DEBUG ADD- fixes when terminal outputs sub_component with spaces ebtween each character
+    def _despace_letter_runs(self, s: str) -> str:
+        """
+        Fixes OCR/Camelot artifacts where words are returned as
+        'S u b s e c r e t a r i a' (letters separated by spaces).
+    
+        This preserves normal spacing for real multi-letter tokens and numbers.
+        """
+        if not s:
+            return s
+    
+        tokens = s.split()
+        out = []
+        run = []
+    
+        def flush_run():
+            nonlocal run
+            if run:
+                out.append("".join(run))
+                run = []
+    
+        for tok in tokens:
+            # Build runs of single-letter alphabetic tokens: S u b s e c ...
+            if len(tok) == 1 and tok.isalpha():
+                run.append(tok)
+                continue
+    
+            flush_run()
+            out.append(tok)
+    
+        flush_run()
+        return " ".join(out)
 
-        # If after clean we only have 1 line
-        if len(cleaned) == 1:
-            return cleaned[0], None
-
-        service = cleaned[0]
-        remainder: List[str] = []
-
-        # Try to attach continuation lines to service_component first
-        for line in cleaned[1:]:
-            if service and self._is_service_continuation(line):
-                service = f"{service} {line}".strip()
-            else:
-                remainder.append(line)
-
-        sub = None
-        if remainder:
-            sub = " ".join(remainder).strip()
-
-        return service or None, sub or None
-
-    # ---------------------------
-    # Main header extraction
-    # ---------------------------
-
+    # ---------- CORE FUNCTIONS SECTION  ----------
+    # Function that only extracts the main report header of each page 
     def extract_main_report_header(
         self,
         pdf_path: str,
@@ -430,20 +452,24 @@ class TableHelper:
     ) -> Dict[str, HeaderValue]:
         """
         PURPOSE:
-            Extracts ONLY the main report header information (top-center header)
-            from a single PDF page using Camelot.
-
-        OUTPUT FIELDS:
-            - ministry: str | None
-            - service_component: str | None
-            - sub_component: str | None
-            - raw_main_header_lines: List[str] | None
-
-        KEY FIXES INCLUDED:
-            - Prevents spaced-letter bug via smart cell joining.
-            - Captures up to 4 lines after ministry.
-            - Properly keeps "Programa Fidae (01)" as part of main header values.
-            - Handles duplicate wrapped header blocks.
+            Extracts ONLY the main report header information (top-center header) from a single
+            PDF page using Camelot, bounded by a main header area box. This avoids mixing
+            the main header with the side header (PARTIDA/CAPÍTULO/PROGRAMA) and table content.
+ 
+        PARAMETERS:
+            - pdf_path: File path to the source PDF.
+            - page_num: 0-based page index (Python-style). Will be converted to Camelot's 1-based page string.
+            - header_main_area: Camelot table_areas string "x1,y1,x2,y2" defining the MAIN header region to extract.
+            - flavor: Camelot extraction flavor ("stream" is usually best for header text blocks).
+            - strip_text: Characters Camelot should strip from cell text (commonly "\\n").
+            - debug: If True, prints intermediate extracted lines for troubleshooting.
+ 
+        RETURNS:
+            A dictionary containing:
+                - ministry: Name of the ministry line (best guess)
+                - service_component: Primary service/component name line
+                - sub_component: Secondary line if present
+                - raw_main_header_lines: Lines used during extraction (debugging Purpose)
         """
         camelot_page = str(page_num + 1)
 
@@ -456,47 +482,74 @@ class TableHelper:
         )
 
         extracted_lines: List[str] = []
+
         if main_tables.n > 0:
             for t in main_tables:
-                extracted_lines.extend(self._lines_from_camelot_df(t.df, drop_side_header=True))
-
+                extracted_lines.extend(self._lines_from_camelot_df(t.df))
+ 
         lines = self._clean_lines("\n".join(extracted_lines))
         head = lines[:40]
-
+ 
         if debug:
             print("\n" + "=" * 90)
             print(f"[DEBUG] header_main_area={header_main_area} | tables_found={main_tables.n}")
             print("=== MAIN REPORT HEADER AREA LINES (CAMELOT) ===")
+
             for i, l in enumerate(head):
                 print(f"{i:02d}: {l}")
-
+ 
         ministry_idx = self._find_line_index(head, r"\bMINISTERIO\b")
-        ministry = head[ministry_idx] if ministry_idx is not None else self._fallback_find_ministry(head)
+        ministry = head[ministry_idx] if ministry_idx is not None else None
+        
+        # --- UPDATE FOR PAGE 713: merge multi-line ministry ( "MINISTERIO DEL TRABAJO" + "Y PREVISIÓN SOCIAL") ---
+        start_after_ministry_idx = None
+        
+        if ministry_idx is not None:
+            start_after_ministry_idx = ministry_idx
 
-        start_after_ministry_idx = ministry_idx if ministry_idx is not None else None
-
+            # Find the first non-sideheader line after the "MINISTERIO..." line
+            nxt = None
+            for j in range(ministry_idx + 1, min(ministry_idx + 6, len(head))):
+                if not self._skip_side_header_line(head[j]):
+                    nxt = j
+                    break
+    
+            # If the next meaningful line is a ministry continuation, merge it
+            if nxt is not None and self._is_ministry_continuation(head[nxt]):
+                ministry = f"{head[ministry_idx].strip()} {head[nxt].strip()}"
+                start_after_ministry_idx = nxt  # start capturing AFTER the continuation line
+    
         captured: List[str] = []
+        service_component = None
+        sub_component = None
+        
         if start_after_ministry_idx is not None:
-            # Capture up to 4 lines after ministry (service + possible wraps + subcomponent + possible wraps)
+            # UPDATE - We need to capture up to 4 main header lines after Ministry line
             for line in head[start_after_ministry_idx + 1 : start_after_ministry_idx + 15]:
                 if self._skip_side_header_line(line):
                     continue
                 captured.append(line)
+                # Updateing to make sure of cases where subcomponent extends to a 4th line
                 if len(captured) >= 4:
                     break
+        service_component, sub_component = (self._split_repeated_wrapped_header_blocks(captured))
+        # service_component, sub_lines = (self._split_repeated_wrapped_header_blocks(captured))
+        # sub_component = (
+        #     self._despace_letter_runs(self._normalize_whitespace(" ".join(sub_lines)))
+        #     if sub_lines else None
+        # )
 
-        service_component, sub_component = self._split_repeated_wrapped_header_blocks(captured)
-
-        raw_main_header_lines: Optional[List[str]] = ([ministry] if ministry else []) + captured
-        if not raw_main_header_lines:
-            raw_main_header_lines = None
 
         if debug:
-            print(f"[DEBUG] ministry_idx={ministry_idx}, ministry={ministry!r}")
-            print(f"[DEBUG] captured={captured!r}")
+            print(f"[DEBUG] ministry_idx = {ministry_idx}, ministry= {ministry!r}")
+            print(f"[DEBUG] start_after_ministry_idx={start_after_ministry_idx}")
+            print(f"[DEBUG] Captured count = {len(captured)}, captured= {captured!r}")
             print(f"[DEBUG] service_component={service_component!r}")
             print(f"[DEBUG] sub_component={sub_component!r}")
-            print(f"[DEBUG] raw_main_header_lines={raw_main_header_lines!r}")
+
+        raw_main_header_lines:Optional[List[str]] = ([ministry] if ministry else []) + captured
+        if not raw_main_header_lines:
+            raw_main_header_lines = None
 
         return {
             "ministry": ministry,
@@ -505,25 +558,28 @@ class TableHelper:
             "raw_main_header_lines": raw_main_header_lines,
         }
 
+
     def extract_main_report_header_return_list(
-        self,
-        pdf_path: str,
-        page_numbers: List[int],
-        *,
-        header_main_area: str,
-        flavor: str = "stream",
-        strip_text: str = "\n",
-        debug: bool = False,
-    ) -> List[Dict[str, Any]]:
+            self,
+            pdf_path: str,
+            page_nums: List[int],
+            *,
+            header_main_area: str,
+            flavor: str = 'stream',
+            strip_text: str = '\n',
+            debug: bool = False,
+    ) -> List[dict]:
         """
         PURPOSE:
-            Batch wrapper for extract_main_report_header over many pages.
+            This function wraps extract_main_report_header and allows to accept a list of pdf pages
 
         RETURNS:
-            List of dicts, each dict includes page_num and main header fields.
+            A list of dictionaries containing main report header (center section) information
         """
-        results: List[Dict[str, Any]] = []
-        for page in page_numbers:
+        # results will hold the main header and side header information
+        results = []
+
+        for page in page_nums:
             out = self.extract_main_report_header(
                 pdf_path=pdf_path,
                 page_num=page,
@@ -532,12 +588,9 @@ class TableHelper:
                 strip_text=strip_text,
                 debug=debug,
             )
+            # out["page_num"] = page
             results.append({"page_num": page, **out})
         return results
-
-    # ---------------------------
-    # Side header extraction
-    # ---------------------------
 
     def extract_side_report_header(
         self,
@@ -548,21 +601,29 @@ class TableHelper:
         flavor: str = "stream",
         strip_text: str = "\n",
         debug: bool = False,
-    ) -> Dict[str, HeaderValue]:
+    ) -> Dict[str, Union[str, List[str], None]]:
         """
         PURPOSE:
             Extracts ONLY the report side header values (PARTIDA/CAPÍTULO/PROGRAMA)
-            from the top-right grey box on a single PDF page using Camelot.
-
+            from the top-right side header box on a single PDF page using Camelot.
+ 
+        PARAMETERS:
+            - pdf_path: File path to the source PDF.
+            - page_num: 0-based page index (Python-style). Will be converted to Camelot's 1-based page string.
+            - header_side_area: Camelot table_areas string "x1,y1,x2,y2" defining the SIDE header region to extract.
+            - flavor: Camelot extraction flavor ("stream" is usually best for header text blocks).
+            - strip_text: Characters Camelot should strip from cell text (commonly "\\n").
+            - debug: If True, prints intermediate extracted lines and parsed values for troubleshooting.
+ 
         RETURNS:
-            Dict with:
-              - partida: str | None
-              - capitulo: str | None
-              - programa: str | None
-              - raw_side_header_lines: List[str] | None
+            A dictionary containing:
+            - partida: PARTIDA value as a string (often 2 digits)
+            - capitulo: CAPÍTULO value as a string (often 2 digits)
+            - programa: PROGRAMA value as a string (often 2 digits)
+            - raw_side_header_lines: Lines used during extraction (debugging aid)
         """
         camelot_page = str(page_num + 1)
-
+ 
         side_tables = camelot.read_pdf(
             pdf_path,
             pages=camelot_page,
@@ -570,30 +631,41 @@ class TableHelper:
             table_areas=[header_side_area],
             strip_text=strip_text,
         )
+ 
+        # DEBUG
+        if debug and side_tables.n > 0:
+            print(f"\n[DEBUG] RAW SIDE HEADER TABLE DF")
+            print(side_tables[0].df)
 
         side_lines: List[str] = []
+
         if side_tables.n > 0:
             for t in side_tables:
-                # Do NOT drop side-header cells here; this region is the side header itself
-                side_lines.extend(self._lines_from_camelot_df(t.df, drop_side_header=False))
-
+                # UPDATED to use revised function with drop_side_header flag
+                side_lines.extend(self._lines_from_camelot_df(t.df,drop_side_header=False))
+ 
         side_clean = self._clean_lines("\n".join(side_lines))
         side_text = self._normalize_whitespace(" ".join(side_clean))
 
+        # DEBUG
         if debug:
-            print("\n" + "=" * 90)
-            print(f"[DEBUG] SIDE HEADER | page_num={page_num} -> camelot_page={camelot_page}")
-            print(f"[DEBUG] header_side_area={header_side_area} | tables_found={side_tables.n}")
-            print("=== SIDE HEADER AREA LINES (CAMELOT) ===")
-            for i, l in enumerate(side_clean[:30]):
-                print(f"{i:02d}: {l}")
-            print(f"[DEBUG] side_text={side_text!r}")
+            print(f"[DEBUG] side_text = {side_text}")
 
         partida = self._extract_labeled_value(side_text, r"\bPARTIDA\b")
         capitulo = self._extract_labeled_value(side_text, r"\bCAP[IÍ]TULO\b")
         programa = self._extract_labeled_value(side_text, r"\bPROGRAMA\b")
+ 
+        # if debug:
+        #     print("\n" + "=" * 90)
+        #     print(f"[DEBUG] SIDE HEADER | page_num={page_num} -> camelot_page={camelot_page}")
+        #     print(f"[DEBUG] header_side_area={header_side_area} | tables_found={side_tables.n}")
+        #     print("=== SIDE HEADER AREA LINES (CAMELOT) ===")
 
-        raw_side_header_lines: Optional[List[str]] = side_clean if side_clean else None
+        #     for i, l in enumerate(side_clean[:40]):
+        #         print(f"{i:02d}: {l}")
+        #     print(f"[DEBUG] parsed partida={partida} capitulo={capitulo} programa={programa}")
+ 
+        raw_side_header_lines = side_clean[:40] if side_clean else None
 
         return {
             "partida": partida,
@@ -603,24 +675,34 @@ class TableHelper:
         }
 
     def extract_side_report_header_return_list(
-        self,
-        pdf_path: str,
-        page_nums: List[int],
-        *,
-        header_side_area: str,
-        flavor: str = "stream",
-        strip_text: str = "\n",
-        debug: bool = False,
-    ) -> List[Dict[str, Any]]:
+            self,
+            pdf_path: str,
+            page_nums: List[int],
+            *,
+            header_side_area: str,
+            flavor: str = 'stream',
+            strip_text: str = "\n",
+            debug: bool = False,
+    ) -> List[dict]:
         """
         PURPOSE:
-            Batch wrapper for extract_side_report_header over many pages.
+            This function wraps extract_side_report_header and allows to accept a list of pdf pages
 
         RETURNS:
-            List of dicts, each dict includes page_num and side header fields.
+            A list of dictionaries containing side report header (top right corner/Grey Box) information on the pdf pages 
         """
-        results: List[Dict[str, Any]] = []
+        if debug:
+            print("[DEBUG] running extract_side_report_header_return_list()")
+
+        # results = []
+        results: List[Dict[str,Any]] = []
+
         for page in page_nums:
+            if debug:
+                print("\n" + "=" * 90)
+                print(f"[DEBUG] SIDE_REPORT_HEADER_RETURN_LIST() | Page_Num: {page}")
+                print("=" * 90)
+
             out = self.extract_side_report_header(
                 pdf_path=pdf_path,
                 page_num=page,
@@ -631,10 +713,7 @@ class TableHelper:
             )
             results.append({"page_num": page, **out})
         return results
-
-    # ---------------------------
-    # Combined extractor (merge)
-    # ---------------------------
+    
 
     def extract_combined_report_headers_return_list(
         self,
@@ -649,26 +728,33 @@ class TableHelper:
     ) -> Dict[int, Dict[str, Any]]:
         """
         PURPOSE:
-            Extracts BOTH main header and side header from multiple PDF pages,
-            and merges results per page_num.
-
+            Extracts BOTH the main report header and the side report header from multiple PDF pages.
+            This function calls the existing batch extractors (main + side) and merges results per page.
+    
+        PARAMETERS:
+            pdf_path: Path to the source PDF file.
+            page_nums: List of 0-based page indexes to extract from.
+            header_main_area: Camelot table_areas bbox string "x1,y1,x2,y2" targeting the main header region.
+            header_side_area: Camelot table_areas bbox string "x1,y1,x2,y2" targeting the side header region.
+            flavor: Camelot extraction flavor (usually "stream").
+            strip_text: Characters Camelot should strip from cell text (commonly "\\n").
+            debug: If True, prints debugging output for each page.
+    
         RETURNS:
-            Dict keyed by page_num (int). Each value is:
-              {
-                "page_num": <int>,
-                "main_header": {...},
-                "side_header": {...}
-              }
+            A dictionary keyed by page_num (int). Each value is a merged dictionary containing:
+            - main header fields (ex: ministry, service_component, sub_component, raw_header_lines)
+            - side header fields (ex: partida, capitulo, programa, raw_side_header_lines)
         """
+        # Run both batch extractors by calling their specific functions with applicable param arguments ie- header search area and side header search area
         main_list = self.extract_main_report_header_return_list(
             pdf_path=pdf_path,
-            page_numbers=page_nums,
+            page_nums=page_nums,
             header_main_area=header_main_area,
             flavor=flavor,
             strip_text=strip_text,
             debug=debug,
         )
-
+    
         side_list = self.extract_side_report_header_return_list(
             pdf_path=pdf_path,
             page_nums=page_nums,
@@ -677,45 +763,54 @@ class TableHelper:
             strip_text=strip_text,
             debug=debug,
         )
-
-        # Index by page_num (force int), warn on duplicates
-        main_by_page: Dict[int, Dict[str, Any]] = {}
+    
+        # Index by page_num (force int), and detect duplicates
+        main_by_page = {}
         for d in main_list:
             if "page_num" not in d:
                 continue
             k = int(d["page_num"])
-            if k in main_by_page and debug:
+            if k in main_by_page:
                 print(f"[WARN] duplicate main header page_num={k} overwriting previous entry")
             main_by_page[k] = d
-
-        side_by_page: Dict[int, Dict[str, Any]] = {}
+        
+        side_by_page = {}
         for d in side_list:
             if "page_num" not in d:
                 continue
             k = int(d["page_num"])
-            if k in side_by_page and debug:
+            if k in side_by_page:
                 print(f"[WARN] duplicate side header page_num={k} overwriting previous entry")
             side_by_page[k] = d
-
+    
+        # Merge per page
         merged: Dict[int, Dict[str, Any]] = {}
-
+    
         for p in page_nums:
             main = main_by_page.get(p, {})
             side = side_by_page.get(p, {})
-
-            # Remove duplicated "page_num" keys inside the child dicts
+    
+            # Remove duplicated "page_num" keys so merged dict is clean
             main = {k: v for k, v in main.items() if k != "page_num"}
             side = {k: v for k, v in side.items() if k != "page_num"}
-
+    
             if debug:
                 print(f"[DEBUG] merge page={p} | main_keys={list(main.keys())} | side_keys={list(side.keys())}")
-                print(f"[DEBUG] main_sub_component={main.get('sub_component')!r}")
-                print(f"[DEBUG] main_raw_lines={main.get('raw_main_header_lines')!r}")
+                print(f"[DEBUG] main_sub_component={main.get('sub_component')}")
+                print(f"[DEBUG] main_raw_lines={main.get('raw_main_header_lines')}")
 
             merged[p] = {
                 "page_num": p,
                 "main_header": main,
                 "side_header": side,
             }
-
+    
+            if debug:
+                print("\n" + "=" * 90)
+                print(f"[DEBUG] MERGED HEADERS | page_num={p}")
+                print(f"[DEBUG] main_header keys: {list(main.keys())}")
+                print(f"[DEBUG] side_header keys: {list(side.keys())}")
+                print("=" * 90)
+    
         return merged
+# ---------- END OF SCRIPT ----------

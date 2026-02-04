@@ -209,3 +209,6 @@ __marimo__/
 # Data dir
 data/*
 /data/
+
+# _DS_Store
+.DS_Store
