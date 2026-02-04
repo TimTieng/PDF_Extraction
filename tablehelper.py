@@ -31,12 +31,14 @@ CONCEPTUAL PROCESS:
 
 # Standard Imports
 import camelot
-from typing import Any, Optional, List, Dict, Union
+import pandas as pd
+from typing import Any, Optional, List, Dict, Tuple, Union
 import re
 
 # Specialty/Custom Libraries
 
 HeaderValue = Union[str,List[str], int, None]
+Number = Union[int, float]
 
 class TableHelper:
     """
@@ -488,6 +490,8 @@ class TableHelper:
         )
 
         return prev_open and cont_like
+    
+
     @classmethod
     def _merge_continuations(cls, lines: List[str]) -> List[str]:
         """
@@ -529,6 +533,73 @@ class TableHelper:
 
         return merged
 
+    # ---------- SERVICE COMPONENT TABLE EXTRACTION HELPER FUNCTIONS SECTION ----------
+    @staticmethod
+    def _parse_csv_floats(value: str, *, expected_n: int) -> Tuple[float, ...]:
+        """
+        Parse a comma-separated string of numbers into floats.
+
+        Args:
+            value: String containing comma-separated numeric values (e.g., "1.0,2.0,3.0,4.0").
+            expected_n: Expected number of numeric values.
+
+        Returns:
+            A tuple of floats of length `expected_n`.
+
+        Raises:
+            ValueError: If the number of values does not match `expected_n` or parsing fails.
+        """
+        parts = [p.strip() for p in value.split(",")]
+        if len(parts) != expected_n:
+            raise ValueError(f"Expected {expected_n} comma-separated values, got {len(parts)}: {value!r}")
+        try:
+            return tuple(float(p) for p in parts)
+        except ValueError as e:
+            raise ValueError(f"Could not parse floats from {value!r}") from e
+
+    @staticmethod
+    def _preview_bbox_to_camelot_area(
+        *,
+        page_height: Number,
+        left: Number,
+        top: Number,
+        width: Number,
+        height: Number,
+        pad: float = 10.0,
+    ) -> str:
+        """
+        Convert a macOS Preview selection (origin top-left) into a Camelot `table_areas` string.
+
+        Preview selection format:
+            left, top, width, height
+            - Origin is top-left
+            - Y increases downward
+
+        Camelot/PDF coordinate format:
+            x1, y1, x2, y2
+            - Origin is bottom-left
+            - Y increases upward
+
+        Args:
+            page_height: PDF page height in points (from the PDF MediaBox).
+            left: Preview selection left (points).
+            top: Preview selection top (points).
+            width: Preview selection width (points).
+            height: Preview selection height (points).
+
+        Returns:
+            A string formatted as "x1,y1,x2,y2" for Camelot `table_areas`.
+        """
+        x1 = float(left) - pad
+        x2 = float(left) + float(width) + pad
+        
+        preview_bottom = float(top) + float(height)
+
+        y1 = float(page_height) - preview_bottom - pad
+        y2 = float(page_height) - float(top) + pad
+
+        return f"{x1},{y1},{x2},{y2}"
+    
 
     # ---------- CORE FUNCTIONS SECTION  ----------
     # Function that only extracts the main report header of each page 
@@ -628,8 +699,6 @@ class TableHelper:
         captured_merged = self._merge_continuations(captured)
         service_component, sub_component = self._split_repeated_wrapped_header_blocks(captured_merged)
 
-
-
         if debug:
             print(f"[DEBUG] ministry_idx = {ministry_idx}, ministry= {ministry!r}")
             print(f"[DEBUG] start_after_ministry_idx={start_after_ministry_idx}")
@@ -681,6 +750,7 @@ class TableHelper:
             # out["page_num"] = page
             results.append({"page_num": page, **out})
         return results
+
 
     def extract_side_report_header(
         self,
@@ -745,16 +815,6 @@ class TableHelper:
         capitulo = self._extract_labeled_value(side_text, r"\bCAP[IÍ]TULO\b")
         programa = self._extract_labeled_value(side_text, r"\bPROGRAMA\b")
  
-        # if debug:
-        #     print("\n" + "=" * 90)
-        #     print(f"[DEBUG] SIDE HEADER | page_num={page_num} -> camelot_page={camelot_page}")
-        #     print(f"[DEBUG] header_side_area={header_side_area} | tables_found={side_tables.n}")
-        #     print("=== SIDE HEADER AREA LINES (CAMELOT) ===")
-
-        #     for i, l in enumerate(side_clean[:40]):
-        #         print(f"{i:02d}: {l}")
-        #     print(f"[DEBUG] parsed partida={partida} capitulo={capitulo} programa={programa}")
- 
         raw_side_header_lines = side_clean[:40] if side_clean else None
 
         return {
@@ -763,6 +823,7 @@ class TableHelper:
             "programa": programa,
             "raw_side_header_lines": raw_side_header_lines,
         }
+
 
     def extract_side_report_header_return_list(
             self,
@@ -903,4 +964,134 @@ class TableHelper:
                 print("=" * 90)
     
         return merged
+    
+
+    # ------------- SERVICE COMPONENT TABLE EXTRACTION SECTION -------------
+    def extract_service_component_table_template_a(
+        self,
+        pdf_path: str,
+        page: Union[int, str],
+        config: Dict[str, Any],
+        *,
+        flavor: str = "lattice",
+        ) -> pd.DataFrame:
+        """
+        Extract the service component table from a single PDF page using Template A config.
+
+        Notes:
+            - This function currently reads the YAML key
+              `service_component_table_areas.template_a_with_usd` (expected_cols=6).
+              If you later add a true 5-column variant, add a separate YAML key/function.
+            - MVP scope: extracts **one page**.
+            - The YAML `table_area_preview` must be measured in macOS Preview as:
+              "left,top,width,height" in PDF points. This is converted to Camelot's
+              "x1,y1,x2,y2" coordinate system.
+
+        Args:
+            pdf_path: Path to the PDF.
+            page: Page number to extract (int or str).
+            config: Parsed YAML config dict with:
+                config["service_component_table_areas"]["template_a_with_usd"] containing:
+                  - page_height
+                  - table_area_preview
+                  - expected_cols
+            flavor: Camelot flavor (default "lattice").
+
+        Returns:
+            DataFrame of the extracted table.
+
+        Raises:
+            KeyError: Missing required config keys.
+            RuntimeError: No tables found in the configured area.
+            ValueError: Extracted table has unexpected column count.
+        """
+        tmpl = config["service_component_table_areas"]["template_a_with_usd"]
+
+        page_height = tmpl["page_height"]
+        expected_cols = int(tmpl["expected_cols"])
+
+        left, top, width, height = self._parse_csv_floats(
+            tmpl["table_area_preview"], expected_n=4
+        )
+        area_str = self._preview_bbox_to_camelot_area(
+            page_height=page_height,
+            left=left,
+            top=top,
+            width=width,
+            height=height,
+        )
+
+        # Build kwargs so we can optionally add explicit column boundaries
+        kwargs = dict(
+            filepath=pdf_path,
+            pages=str(page),
+            flavor=flavor,
+            table_areas=[area_str],
+        )
+
+        columns_preview = tmpl.get("columns_preview")
+        if columns_preview and flavor == "stream":
+            cols = [
+                str(float(x))
+                for x in self._parse_csv_floats(columns_preview, expected_n=expected_cols - 1)
+            ]
+            kwargs["columns"] = [",".join(cols)]
+
+        tables = camelot.read_pdf(**kwargs)
+
+
+        if tables.n == 0 and flavor == "lattice":
+            # Fallback: sometimes lines aren't detected even though the table is visible
+            tables = camelot.read_pdf(
+                pdf_path,
+                pages=str(page),
+                flavor="stream",
+                table_areas=[area_str],
+            )
+
+        if tables.n == 0:
+            raise RuntimeError(
+                f"No tables found by Camelot on page={page} using table_area={area_str} "
+                f"(template_a_with_usd)."
+            )
+
+        best = max(tables, key=lambda t: int(t.shape[0]) * int(t.shape[1]))
+        df = best.df
+
+        # If lattice found a table but the column count is wrong, try stream (with columns if available)
+        if df.shape[1] != expected_cols and flavor == "lattice":
+            stream_kwargs = dict(
+                filepath=pdf_path,
+                pages=str(page),
+                flavor="stream",
+                table_areas=[area_str],
+            )
+
+            stream_kwargs["split_text"] = True
+            
+            columns_preview = tmpl.get("columns_preview")
+            if columns_preview:
+                cols = [
+                    str(float(x))
+                    for x in self._parse_csv_floats(columns_preview, expected_n=expected_cols - 1)
+                ]
+                stream_kwargs["columns"] = [",".join(cols)]
+
+            stream_tables = camelot.read_pdf(**stream_kwargs)
+
+            if stream_tables.n > 0:
+                best_stream = max(stream_tables, key=lambda t: int(t.shape[0]) * int(t.shape[1]))
+                df_stream = best_stream.df
+                if df_stream.shape[1] == expected_cols:
+                    df = df_stream  # accept stream result
+
+        # Final validation (after giving stream a chance)
+        if df.shape[1] != expected_cols:
+            raise ValueError(
+                f"Template A extraction failed validation: expected {expected_cols} columns, "
+                f"got {df.shape[1]} (page={page}, flavor={flavor}, area={area_str})."
+            )
+
+        return df
+
 # ---------- END OF SCRIPT ----------

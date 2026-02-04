@@ -16,6 +16,7 @@ CONCEPTUAL OVERVIEW/LOGIC FLOW:
 # Standard Python Packages
 import time
 import camelot
+import pandas as pd
 import yaml
 
 # Specialty/Custom Packages
@@ -134,6 +135,28 @@ def teset_combined_report_header_return_list():
         for k, v in information['side_header'].items():
             print(f"    {k}:    {v}")
 
+
+def test_service_component_table_template_a():
+    """
+    testing the extraction of service component table template A
+    """
+    yaml_path = "config/chile_pdf.yaml"
+    config = load_yaml(yaml_path)
+    pdf_path = "data/chile_budget_2025.pdf"
+    page = 554
+    service_component_table_area = config['service_component_table_areas']['template_a_with_usd']['table_area_preview']
+    helper = TableHelper()
+
+    df = helper.extract_service_component_table_template_a(
+        pdf_path=pdf_path,
+        page=page,
+        config=config,
+    )
+
+    print(df)
+    print(f"Extracted rows={df.shape[0]}, cols={df.shape[1]} from page={page}")
+
+
 # Primary Orchestration/Execution Function 
 # This is the main function that will be executed when the script runs
 def execute_tests() -> None:
@@ -151,8 +174,11 @@ def execute_tests() -> None:
     # print("\n-------- TESTING EXTRACT SIDE REPORT HEADER RETURN LIST FUNCTION --------\n")
     # test_extract_side_report_header_return_list()
 
-    print("\n-------- TESTING EXTRACT COMBINED REPORT HEADER RETURN LIST FUNCTION --------\n")
-    teset_combined_report_header_return_list()
+    # print("\n-------- TESTING EXTRACT COMBINED REPORT HEADER RETURN LIST FUNCTION --------\n")
+    # teset_combined_report_header_return_list()
+
+    print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE A FUNCTION --------\n")
+    test_service_component_table_template_a()
     
 
 
