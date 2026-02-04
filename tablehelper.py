@@ -437,6 +437,98 @@ class TableHelper:
     
         flush_run()
         return " ".join(out)
+    
+    @staticmethod
+    def _looks_like_continuation(curr: str, prev: str) -> bool:
+        """
+        Determine whether a line of header text is a wrapped continuation of the
+        previous line.
+
+        This helper is used during PDF header reconstruction to detect cases where
+        a logical header line has been visually wrapped across multiple lines by
+        the PDF layout engine (e.g., long parenthetical lists of codes).
+
+        The heuristic is intentionally conservative to avoid false positives.
+        A line is considered a continuation only when:
+            - The previous line appears "open" (e.g., ends with a comma, hyphen,
+            or contains an unclosed parenthesis), AND
+            - The current line consists primarily of digits and/or punctuation
+            (e.g., numeric lists, closing parentheses).
+
+        This approach favors preserving original header structure over aggressive
+        merging, reducing the risk of combining unrelated header fields.
+
+        Parameters
+        ----------
+        curr : str
+            The current line being evaluated.
+        prev : str
+            The previous header line already captured.
+
+        Returns
+        -------
+        bool
+            True if the current line should be merged into the previous line as a
+            wrapped continuation; False otherwise.
+        """
+        c = curr.strip()
+        p = prev.strip()
+        # If previous line looks "open" (wrap/continuation likely)
+        prev_open = (
+            p.endswith(",")
+            or (p.count("(") > p.count(")"))
+            or p.endswith("-")
+        )
+
+        # Current line is mostly "continuation-ish" (numbers/punct/closing paren)
+        cont_like = (
+            bool(re.match(r"^[\d\W]+$", c))  # digits/punctuation only
+            or bool(re.match(r"^[\)\],;\.\s]+", c))
+            or bool(re.match(r"^[\d]{1,2}\b", c))  # starts with a number
+        )
+
+        return prev_open and cont_like
+    @classmethod
+    def _merge_continuations(cls, lines: List[str]) -> List[str]:
+        """
+        Merge wrapped continuation lines in a sequence of extracted header lines.
+
+        This method reconstructs logical header lines that were split across
+        multiple visual lines in the source PDF. It relies on
+        `_looks_like_continuation` to conservatively identify continuation patterns
+        and merge them into a single coherent line.
+
+        The merge is performed left-to-right, preserving original order and spacing.
+        Lines that do not meet the continuation criteria are left unchanged.
+
+        This function is intended to operate on already-filtered header text
+        (e.g., main report header lines) prior to semantic parsing into specific
+        header fields.
+
+        Parameters
+        ----------
+        lines : List[str]
+            A list of extracted header lines in document order.
+
+        Returns
+        -------
+        List[str]
+            A new list of header lines with wrapped continuations merged into their
+            preceding lines.
+        """
+        merged: List[str] = []
+        for line in lines:
+            if not merged:
+                merged.append(line)
+                continue
+
+            if cls._looks_like_continuation(line, merged[-1]):
+                merged[-1] = f"{merged[-1].rstrip()} {line.lstrip()}"
+            else:
+                merged.append(line)
+
+        return merged
+
 
     # ---------- CORE FUNCTIONS SECTION  ----------
     # Function that only extracts the main report header of each page 
@@ -532,12 +624,10 @@ class TableHelper:
                 # Updateing to make sure of cases where subcomponent extends to a 4th line
                 if len(captured) >= 4:
                     break
-        service_component, sub_component = (self._split_repeated_wrapped_header_blocks(captured))
-        # service_component, sub_lines = (self._split_repeated_wrapped_header_blocks(captured))
-        # sub_component = (
-        #     self._despace_letter_runs(self._normalize_whitespace(" ".join(sub_lines)))
-        #     if sub_lines else None
-        # )
+        # service_component, sub_component = (self._split_repeated_wrapped_header_blocks(captured))
+        captured_merged = self._merge_continuations(captured)
+        service_component, sub_component = self._split_repeated_wrapped_header_blocks(captured_merged)
+
 
 
         if debug:
