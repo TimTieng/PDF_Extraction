@@ -1,0 +1,7 @@
+camelot-py
+numpy
+pandas
+polars
+datetime
+pypdf
+pyyaml
