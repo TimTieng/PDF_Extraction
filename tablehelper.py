@@ -880,33 +880,55 @@ class TableHelper:
         return base_table_area_str, glosas_cut_y_pdf
 
 
+    @staticmethod
     def _score_template_a_alignment(df: pd.DataFrame) -> int:
         """
         Heuristic score for whether a 6-col Template A extraction is aligned correctly.
-
         Higher is better.
         """
-        if df is None or df.empty or df.shape[1] < 3:
+        if df is None or df.empty or df.shape[1] != 6:
             return -10_000
 
-        # Canonical names assumed already applied; if not, use numeric indexes accordingly.
-        # Here we assume: sub_titulo, item_asig, denominaciones, glosa_no, clp, usd
-        denom = df["denominaciones"].fillna("").astype(str)
-        item  = df["item_asig"].fillna("").astype(str)
-        sub   = df["sub_titulo"].fillna("").astype(str)
+        tmp = df.copy()
+        tmp.columns = [
+            "sub_titulo",
+            "item_asig",
+            "denominaciones",
+            "glosa_no",
+            "moneda_nacional_miles_de_$CLP",
+            "moneda_ext_convertida_miles_USD",
+        ]
 
-        # Good signals:
-        # - denominaciones has lots of text (not empty)
-        # - item_asig is mostly numeric codes (or empty), not words like "INGRESOS"
-        denom_nonempty = (denom.str.len() > 0).sum()
+        denom = tmp["denominaciones"].fillna("").astype(str).str.strip()
+        item  = tmp["item_asig"].fillna("").astype(str).str.strip()
+        sub   = tmp["sub_titulo"].fillna("").astype(str).str.strip()
+        glosa = tmp["glosa_no"].fillna("").astype(str).str.strip()
+        clp   = tmp["moneda_nacional_miles_de_$CLP"].fillna("").astype(str).str.strip()
+        usd   = tmp["moneda_ext_convertida_miles_USD"].fillna("").astype(str).str.strip()
 
+        denom_nonempty = (denom != "").sum()
+
+        # Sub-titulo should have many 2-digit codes (or blanks), not words
+        sub_numeric_or_empty = (sub.eq("") | sub.str.fullmatch(r"\d{2}", na=False)).sum()
+        sub_nonempty = (sub != "").sum()
+
+        # Item can have 1–3 digits or be empty (014, 01, 243, etc.)
         item_numeric_or_empty = (item.eq("") | item.str.fullmatch(r"\d{1,3}", na=False)).sum()
         item_has_words = item.str.contains(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", regex=True).sum()
 
-        sub_numeric_or_empty = (sub.eq("") | sub.str.fullmatch(r"\d{2}", na=False)).sum()
+        # Glosa should contain some 2-digit codes on many pages
+        glosa_nonempty = (glosa != "").sum()
+        glosa_2digit = glosa.str.fullmatch(r"\d{2}", na=False).sum()
 
-        # Penalty if we see obvious headings in item_asig (classic misalignment)
-        bad_headings = item.str.contains(r"\b(INGRESOS|GASTOS|APORTE|TRANSFERENCIAS)\b", regex=True).sum()
+        # Detect classic shifts: glosa codes leaking into CLP
+        clp_2digit_like = clp.str.fullmatch(r"\d{2}", na=False).sum()
+
+        # Detect money swapping: if USD is too "full" compared to CLP (rough signal)
+        clp_nonempty = (clp != "").sum()
+        usd_nonempty = (usd != "").sum()
+
+        bad_headings = item.str.contains(r"\b(?:INGRESOS|GASTOS|APORTE|TRANSFERENCIAS)\b", regex=True).sum()
+
 
         score = 0
         score += 2 * denom_nonempty
@@ -915,7 +937,15 @@ class TableHelper:
         score -= 3 * item_has_words
         score -= 10 * bad_headings
 
+        # Strong alignment incentives / penalties
+        score += 4 * glosa_2digit
+        score -= 30 * (1 if sub_nonempty < 2 else 0)          # subtitle missing => big penalty
+        score -= 30 * (1 if glosa_nonempty == 0 else 0)       # glosa missing => big penalty
+        score -= 20 * clp_2digit_like                         # glosa leaking into CLP
+        score -= 10 * (1 if (usd_nonempty > clp_nonempty and clp_nonempty < 3) else 0)
+
         return int(score)
+
 
 
     # ---------- CORE FUNCTIONS SECTION  ----------
@@ -1338,7 +1368,7 @@ class TableHelper:
             height=height,
         )
 
-
+        # --- Crop table area above any GLOSAS section (financial table only) ---
         area_str, glosas_cut_y = self._crop_table_area_above_glosas(
             pdf_path=pdf_path,
             camelot_page=int(page),
@@ -1346,36 +1376,24 @@ class TableHelper:
             page_height=float(page_height),
         )
         if glosas_cut_y is not None:
-            logger.debug(f"GLOSAS detected on page {page} at y={glosas_cut_y}")
+            logger.debug(f"GLOSAS detected on page {page} at y={glosas_cut_y} (cropping financial table only)")
 
-        columns_key = "columns_preview_glosas" if glosas_cut_y is not None else "columns_preview_full"
-        columns_preview = tmpl.get(columns_key)
+        # IMPORTANT: For Template A financial tables, ALWAYS use FULL column cuts.
+        columns_full = tmpl.get("columns_preview_full")
 
-        # If this is a "glosas page", lattice often over-splits columns. Prefer stream first.
-        if glosas_cut_y is not None:
-            flavor = "stream"
-
-        # kwargs = dict(
-        #     filepath=pdf_path,
-        #     pages=str(page),
-        #     flavor=flavor,
-        #     table_areas=[area_str],
-        # )
-
-        # if flavor == "stream" and columns_preview:
-        #     cols = [
-        #         str(float(x))
-        #         for x in self._parse_csv_floats(columns_preview, expected_n=expected_cols - 1)
-        #     ]
-        #     kwargs["columns"] = [",".join(cols)]
-        #     kwargs["split_text"] = False
-
-        # if columns_preview and flavor == "stream":
-        #     cols = [str(float(x)) for x in self._parse_csv_floats(columns_preview, expected_n=expected_cols - 1)]
-        #     kwargs["columns"] = [",".join(cols)]
- 
         def _best_table(tables):
             return max(tables, key=lambda t: int(t.shape[0]) * int(t.shape[1]))
+
+        def _df_from_tables(tables_):
+            if tables_ is None:
+                return pd.DataFrame()
+
+            n = getattr(tables_, "n", None)
+            if n is not None:
+                return pd.DataFrame() if n == 0 else _best_table(tables_).df
+
+            # fallback if it's a list-like
+            return pd.DataFrame() if len(tables_) == 0 else _best_table(tables_).df
 
         def _read_stream(area_str: str, columns_preview: str | None):
             stream_kwargs = dict(
@@ -1395,20 +1413,29 @@ class TableHelper:
                 stream_kwargs["columns"] = [",".join(cols)]
             return camelot.read_pdf(**stream_kwargs)
 
-        # Decide which column layout to use
-        columns_key = (
-            "columns_preview_glosas"
-            if glosas_cut_y is not None
-            else "columns_preview_full"
-        )
-        columns_preview = tmpl.get(columns_key)
+        def _shift_columns_preview(columns_preview: str, delta: float) -> str:
+            """
+            Shift column divider x-positions by delta, but keep the FIRST divider fixed.
+
+            Why: The left edge / Sub-Título cut is very stable across pages, but the
+            Ítem Asig | Denominaciones boundary can drift and sometimes needs adjustment.
+            """
+            xs = list(self._parse_csv_floats(columns_preview, expected_n=expected_cols - 1))
+
+            # Defensive: Template A expects 5 dividers when expected_cols=6
+            if len(xs) != expected_cols - 1:
+                return columns_preview
+
+            # Freeze ONLY the first cut (Sub-Título | Ítem Asig).
+            shifted = [xs[0]] + [float(x) + float(delta) for x in xs[1:]]
+            return ",".join(str(x) for x in shifted)
+
+
 
         # ---- Extraction strategy ----
-        if glosas_cut_y is not None:
-            # GLOSAS pages: stream first (deterministic)
-            tables = _read_stream(area_str, columns_preview)
-        else:
-            # Non-GLOSAS pages: try lattice first
+        # Keep your original behavior for "normal" pages (lattice first),
+        # but ALWAYS score/choose final output from stream with FULL cuts (and small deltas if needed).
+        if glosas_cut_y is None:
             tables = camelot.read_pdf(
                 filepath=pdf_path,
                 pages=str(page),
@@ -1416,31 +1443,38 @@ class TableHelper:
                 table_areas=[area_str],
             )
 
-            # Validate lattice result
+            # Validate lattice result; if it doesn't look right, use stream.
             if tables.n == 0:
-                tables = _read_stream(area_str, columns_preview)
+                tables = _read_stream(area_str, columns_full)
             else:
                 df_try = _best_table(tables).df
                 if df_try.shape[1] != expected_cols:
-                    tables = _read_stream(area_str, columns_preview)
+                    tables = _read_stream(area_str, columns_full)
+        else:
+            # Mixed page (financial table + glosas underneath): stream only, using FULL cuts.
+            tables = _read_stream(area_str, columns_full)
 
         if tables.n == 0:
             raise RuntimeError(
                 f"No tables found by Camelot on page={page} using area={area_str}."
             )
 
-        # --- Choose the best-aligned stream result (handles shifted layouts like page 565) ---
-        columns_full = tmpl.get("columns_preview_full")
-        columns_glos = tmpl.get("columns_preview_glosas")
+        # --- Final alignment rescue (only if baseline is bad) ---
+        # Baseline (delta=0) should preserve the other pages.
+        df0 = _df_from_tables(_read_stream(area_str, columns_full))
+        score0 = self._score_template_a_alignment(df0)
 
-        def _score_template_a_alignment(df: pd.DataFrame) -> int:
-            if df is None or df.empty:
-                return -10_000
-            if df.shape[1] != expected_cols:
-                return -10_000
+        def _needs_delta_rescue_template_a(df_: pd.DataFrame) -> bool:
+            """
+            Only trigger delta-search for the specific 'cascade shift' failure mode:
+            - Glosa column empty but glosa-like 2-digit codes appear in CLP
+            - CLP appears to have shifted into USD (USD "too full" while CLP sparse)
+            This avoids destabilizing otherwise-good pages (e.g., 559/565).
+            """
+            if df_ is None or df_.empty or df_.shape[1] != expected_cols:
+                return True
 
-            # Temporarily assign canonical names for scoring
-            tmp = df.copy()
+            tmp = df_.copy()
             tmp.columns = [
                 "sub_titulo",
                 "item_asig",
@@ -1450,46 +1484,54 @@ class TableHelper:
                 "moneda_ext_convertida_miles_USD",
             ]
 
-            denom = tmp["denominaciones"].fillna("").astype(str)
-            item = tmp["item_asig"].fillna("").astype(str)
-            sub = tmp["sub_titulo"].fillna("").astype(str)
+            glosa = tmp["glosa_no"].fillna("").astype(str).str.strip()
+            clp   = tmp["moneda_nacional_miles_de_$CLP"].fillna("").astype(str).str.strip()
+            usd   = tmp["moneda_ext_convertida_miles_USD"].fillna("").astype(str).str.strip()
 
-            denom_nonempty = (denom.str.len() > 0).sum()
-            item_numeric_or_empty = (item.eq("") | item.str.fullmatch(r"\d{1,3}", na=False)).sum()
-            sub_numeric_or_empty = (sub.eq("") | sub.str.fullmatch(r"\d{2}", na=False)).sum()
+            glosa_nonempty = (glosa != "").sum()
+            clp_2digit_like = clp.str.fullmatch(r"\d{2}", na=False).sum()
 
-            item_has_words = item.str.contains(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", regex=True).sum()
-            bad_headings = item.str.contains(r"\b(INGRESOS|GASTOS|APORTE|TRANSFERENCIAS)\b", regex=True).sum()
+            clp_nonempty = (clp != "").sum()
+            usd_nonempty = (usd != "").sum()
 
-            score = 0
-            score += 2 * denom_nonempty
-            score += 2 * item_numeric_or_empty
-            score += 1 * sub_numeric_or_empty
-            score -= 3 * item_has_words
-            score -= 10 * bad_headings
-            return int(score)
+            # Trigger conditions: the cascade symptoms you reported on the last page
+            glosa_shifted_into_clp = (glosa_nonempty == 0 and clp_2digit_like >= 2)
+            clp_shifted_into_usd = (usd_nonempty > clp_nonempty and clp_nonempty < 3)
 
-        def _df_from_tables(tables_):
-            if tables_.n == 0:
-                return pd.DataFrame()
-            return _best_table(tables_).df
+            return glosa_shifted_into_clp or clp_shifted_into_usd
 
-        # If we're already on stream (glosas pages) OR if lattice was used but may be misaligned,
-        # try both divider sets using stream and keep the better-aligned extraction.
-        preferred = columns_glos if glosas_cut_y is not None else columns_full
-        alternate = columns_full if preferred == columns_glos else columns_glos
 
-        df_best = _df_from_tables(_read_stream(area_str, preferred))
-        best_score = _score_template_a_alignment(df_best)
+        # Baseline should preserve good pages (559/565). Only run delta rescue when the *cascade* is detected.
+        if not _needs_delta_rescue_template_a(df0):
+            df = df0
+        else:
+            candidates: list[tuple[float, pd.DataFrame, int]] = [(0.0, df0, score0)]
 
-        if alternate:
-            df_alt = _df_from_tables(_read_stream(area_str, alternate))
-            alt_score = _score_template_a_alignment(df_alt)
-            if alt_score > best_score:
-                df_best = df_alt
-                best_score = alt_score
+            for delta in (-6.0, 6.0, -12.0, 12.0):
+                cols = _shift_columns_preview(columns_full, delta)
+                df_cand = _df_from_tables(_read_stream(area_str, cols))
+                score = self._score_template_a_alignment(df_cand)
+                candidates.append((delta, df_cand, score))
 
-        df = df_best
+            best_delta, df_best, best_score = max(candidates, key=lambda t: t[2])
+
+            # Safety gate: only accept a non-zero delta if it's a *meaningful* improvement.
+            # Prevents small score fluctuations from breaking Sub/Item on otherwise-good pages.
+            min_gain = 25
+            if best_delta != 0.0 and best_score < score0 + min_gain:
+                logger.debug(
+                    f"Delta candidate rejected on page={page}: best_delta={best_delta} "
+                    f"best_score={best_score} baseline={score0} (gain<{min_gain})"
+                )
+                df = df0
+            else:
+                if best_delta != 0.0:
+                    logger.debug(
+                        f"Template A alignment rescue applied on page={page}: "
+                        f"selected delta={best_delta} score={best_score} baseline={score0}"
+                    )
+                df = df_best
+
 
         # Final validation
         if df.shape[1] != expected_cols:
@@ -1497,70 +1539,6 @@ class TableHelper:
                 f"Template A extraction failed validation: expected {expected_cols} columns, "
                 f"got {df.shape[1]} (page={page}, area={area_str})."
             )
-
-
-        # if tables.n == 0:
-        #     raise RuntimeError(
-        #         f"No tables found by Camelot on page={page} using area={area_str}."
-        #     )
-
-        # df = _best_table(tables).df
-
-        # if df.shape[1] != expected_cols:
-        #     raise ValueError(
-        #         f"Template A extraction failed validation: expected {expected_cols} columns, "
-        #         f"got {df.shape[1]} (page={page}, area={area_str})."
-        #     )
-
-
-        # best = max(tables, key=lambda t: int(t.shape[0]) * int(t.shape[1]))
-        # df = best.df
-
-        # # If lattice found a table but the column count is wrong, try stream (with columns if available)
-        # if df.shape[1] != expected_cols and flavor == "lattice":
-        #     stream_kwargs = dict(
-        #         filepath=pdf_path,
-        #         pages=str(page),
-        #         flavor="stream",
-        #         table_areas=[area_str],
-        #     )
-
-        #     stream_kwargs["split_text"] = True
-
-        #     columns_preview = tmpl.get("columns_preview")
-        #     if columns_preview:
-        #         cols = [
-        #             str(float(x))
-        #             for x in self._parse_csv_floats(columns_preview, expected_n=expected_cols - 1)
-        #         ]
-        #         stream_kwargs["columns"] = [",".join(cols)]
-
-        #     # stream_tables = camelot.read_pdf(**stream_kwargs)
-        #     stream_kwargs["split_text"] = False
-        #     stream_tables = camelot.read_pdf(**stream_kwargs)
-
-        #     # If you get the right number of cols, accept it.
-        #     if stream_tables.n > 0:
-        #         best_stream = max(stream_tables, key=lambda t: int(t.shape[0]) * int(t.shape[1]))
-        #         df_stream = best_stream.df
-        #         if df_stream.shape[1] == expected_cols:
-        #             df = df_stream
-        #         else:
-        #             # 2) Only if you *still* need it, try split_text=True
-        #             stream_kwargs["split_text"] = True
-        #             stream_tables2 = camelot.read_pdf(**stream_kwargs)
-        #             if stream_tables2.n > 0:
-        #                 best_stream2 = max(stream_tables2, key=lambda t: int(t.shape[0]) * int(t.shape[1]))
-        #                 df_stream2 = best_stream2.df
-        #                 if df_stream2.shape[1] == expected_cols:
-        #                     df = df_stream2
-
-        # # Final validation (after giving stream a chance)
-        # if df.shape[1] != expected_cols:
-        #     raise ValueError(
-        #         f"Template A extraction failed validation: expected {expected_cols} columns, "
-        #         f"got {df.shape[1]} (page={page}, flavor={flavor}, area={area_str})."
-        #     )
 
         # Assign canonical column names
         df.columns = [
