@@ -1,7 +1,6 @@
 """
 CREATED: 30 JAN 2026
-AUTHOR: @GAMBIT
-JIRA TICKET: TBD
+UPDATED 05 FEB 2026
 
 PURPOSE:
     The TableHelper Class will contain several methods and helper functions to assist in structuring and formatting table content 

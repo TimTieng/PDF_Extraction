@@ -3,5 +3,6 @@ numpy
 pandas
 polars
 datetime
+pymupdf
 pypdf
 pyyaml
