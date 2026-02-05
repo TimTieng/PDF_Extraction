@@ -880,6 +880,44 @@ class TableHelper:
         return base_table_area_str, glosas_cut_y_pdf
 
 
+    def _score_template_a_alignment(df: pd.DataFrame) -> int:
+        """
+        Heuristic score for whether a 6-col Template A extraction is aligned correctly.
+
+        Higher is better.
+        """
+        if df is None or df.empty or df.shape[1] < 3:
+            return -10_000
+
+        # Canonical names assumed already applied; if not, use numeric indexes accordingly.
+        # Here we assume: sub_titulo, item_asig, denominaciones, glosa_no, clp, usd
+        denom = df["denominaciones"].fillna("").astype(str)
+        item  = df["item_asig"].fillna("").astype(str)
+        sub   = df["sub_titulo"].fillna("").astype(str)
+
+        # Good signals:
+        # - denominaciones has lots of text (not empty)
+        # - item_asig is mostly numeric codes (or empty), not words like "INGRESOS"
+        denom_nonempty = (denom.str.len() > 0).sum()
+
+        item_numeric_or_empty = (item.eq("") | item.str.fullmatch(r"\d{1,3}", na=False)).sum()
+        item_has_words = item.str.contains(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", regex=True).sum()
+
+        sub_numeric_or_empty = (sub.eq("") | sub.str.fullmatch(r"\d{2}", na=False)).sum()
+
+        # Penalty if we see obvious headings in item_asig (classic misalignment)
+        bad_headings = item.str.contains(r"\b(INGRESOS|GASTOS|APORTE|TRANSFERENCIAS)\b", regex=True).sum()
+
+        score = 0
+        score += 2 * denom_nonempty
+        score += 2 * item_numeric_or_empty
+        score += 1 * sub_numeric_or_empty
+        score -= 3 * item_has_words
+        score -= 10 * bad_headings
+
+        return int(score)
+
+
     # ---------- CORE FUNCTIONS SECTION  ----------
     # Function that only extracts the main report header of each page 
     def extract_main_report_header(
@@ -1317,24 +1355,24 @@ class TableHelper:
         if glosas_cut_y is not None:
             flavor = "stream"
 
-        kwargs = dict(
-            filepath=pdf_path,
-            pages=str(page),
-            flavor=flavor,
-            table_areas=[area_str],
-        )
+        # kwargs = dict(
+        #     filepath=pdf_path,
+        #     pages=str(page),
+        #     flavor=flavor,
+        #     table_areas=[area_str],
+        # )
 
-        if flavor == "stream" and columns_preview:
-            cols = [
-                str(float(x))
-                for x in self._parse_csv_floats(columns_preview, expected_n=expected_cols - 1)
-            ]
-            kwargs["columns"] = [",".join(cols)]
-            kwargs["split_text"] = False
+        # if flavor == "stream" and columns_preview:
+        #     cols = [
+        #         str(float(x))
+        #         for x in self._parse_csv_floats(columns_preview, expected_n=expected_cols - 1)
+        #     ]
+        #     kwargs["columns"] = [",".join(cols)]
+        #     kwargs["split_text"] = False
 
-        if columns_preview and flavor == "stream":
-            cols = [str(float(x)) for x in self._parse_csv_floats(columns_preview, expected_n=expected_cols - 1)]
-            kwargs["columns"] = [",".join(cols)]
+        # if columns_preview and flavor == "stream":
+        #     cols = [str(float(x)) for x in self._parse_csv_floats(columns_preview, expected_n=expected_cols - 1)]
+        #     kwargs["columns"] = [",".join(cols)]
  
         def _best_table(tables):
             return max(tables, key=lambda t: int(t.shape[0]) * int(t.shape[1]))
@@ -1391,8 +1429,69 @@ class TableHelper:
                 f"No tables found by Camelot on page={page} using area={area_str}."
             )
 
-        df = _best_table(tables).df
+        # --- Choose the best-aligned stream result (handles shifted layouts like page 565) ---
+        columns_full = tmpl.get("columns_preview_full")
+        columns_glos = tmpl.get("columns_preview_glosas")
 
+        def _score_template_a_alignment(df: pd.DataFrame) -> int:
+            if df is None or df.empty:
+                return -10_000
+            if df.shape[1] != expected_cols:
+                return -10_000
+
+            # Temporarily assign canonical names for scoring
+            tmp = df.copy()
+            tmp.columns = [
+                "sub_titulo",
+                "item_asig",
+                "denominaciones",
+                "glosa_no",
+                "moneda_nacional_miles_de_$CLP",
+                "moneda_ext_convertida_miles_USD",
+            ]
+
+            denom = tmp["denominaciones"].fillna("").astype(str)
+            item = tmp["item_asig"].fillna("").astype(str)
+            sub = tmp["sub_titulo"].fillna("").astype(str)
+
+            denom_nonempty = (denom.str.len() > 0).sum()
+            item_numeric_or_empty = (item.eq("") | item.str.fullmatch(r"\d{1,3}", na=False)).sum()
+            sub_numeric_or_empty = (sub.eq("") | sub.str.fullmatch(r"\d{2}", na=False)).sum()
+
+            item_has_words = item.str.contains(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", regex=True).sum()
+            bad_headings = item.str.contains(r"\b(INGRESOS|GASTOS|APORTE|TRANSFERENCIAS)\b", regex=True).sum()
+
+            score = 0
+            score += 2 * denom_nonempty
+            score += 2 * item_numeric_or_empty
+            score += 1 * sub_numeric_or_empty
+            score -= 3 * item_has_words
+            score -= 10 * bad_headings
+            return int(score)
+
+        def _df_from_tables(tables_):
+            if tables_.n == 0:
+                return pd.DataFrame()
+            return _best_table(tables_).df
+
+        # If we're already on stream (glosas pages) OR if lattice was used but may be misaligned,
+        # try both divider sets using stream and keep the better-aligned extraction.
+        preferred = columns_glos if glosas_cut_y is not None else columns_full
+        alternate = columns_full if preferred == columns_glos else columns_glos
+
+        df_best = _df_from_tables(_read_stream(area_str, preferred))
+        best_score = _score_template_a_alignment(df_best)
+
+        if alternate:
+            df_alt = _df_from_tables(_read_stream(area_str, alternate))
+            alt_score = _score_template_a_alignment(df_alt)
+            if alt_score > best_score:
+                df_best = df_alt
+                best_score = alt_score
+
+        df = df_best
+
+        # Final validation
         if df.shape[1] != expected_cols:
             raise ValueError(
                 f"Template A extraction failed validation: expected {expected_cols} columns, "
@@ -1400,54 +1499,68 @@ class TableHelper:
             )
 
 
-        best = max(tables, key=lambda t: int(t.shape[0]) * int(t.shape[1]))
-        df = best.df
+        # if tables.n == 0:
+        #     raise RuntimeError(
+        #         f"No tables found by Camelot on page={page} using area={area_str}."
+        #     )
 
-        # If lattice found a table but the column count is wrong, try stream (with columns if available)
-        if df.shape[1] != expected_cols and flavor == "lattice":
-            stream_kwargs = dict(
-                filepath=pdf_path,
-                pages=str(page),
-                flavor="stream",
-                table_areas=[area_str],
-            )
+        # df = _best_table(tables).df
 
-            stream_kwargs["split_text"] = True
+        # if df.shape[1] != expected_cols:
+        #     raise ValueError(
+        #         f"Template A extraction failed validation: expected {expected_cols} columns, "
+        #         f"got {df.shape[1]} (page={page}, area={area_str})."
+        #     )
 
-            columns_preview = tmpl.get("columns_preview")
-            if columns_preview:
-                cols = [
-                    str(float(x))
-                    for x in self._parse_csv_floats(columns_preview, expected_n=expected_cols - 1)
-                ]
-                stream_kwargs["columns"] = [",".join(cols)]
 
-            # stream_tables = camelot.read_pdf(**stream_kwargs)
-            stream_kwargs["split_text"] = False
-            stream_tables = camelot.read_pdf(**stream_kwargs)
+        # best = max(tables, key=lambda t: int(t.shape[0]) * int(t.shape[1]))
+        # df = best.df
 
-            # If you get the right number of cols, accept it.
-            if stream_tables.n > 0:
-                best_stream = max(stream_tables, key=lambda t: int(t.shape[0]) * int(t.shape[1]))
-                df_stream = best_stream.df
-                if df_stream.shape[1] == expected_cols:
-                    df = df_stream
-                else:
-                    # 2) Only if you *still* need it, try split_text=True
-                    stream_kwargs["split_text"] = True
-                    stream_tables2 = camelot.read_pdf(**stream_kwargs)
-                    if stream_tables2.n > 0:
-                        best_stream2 = max(stream_tables2, key=lambda t: int(t.shape[0]) * int(t.shape[1]))
-                        df_stream2 = best_stream2.df
-                        if df_stream2.shape[1] == expected_cols:
-                            df = df_stream2
+        # # If lattice found a table but the column count is wrong, try stream (with columns if available)
+        # if df.shape[1] != expected_cols and flavor == "lattice":
+        #     stream_kwargs = dict(
+        #         filepath=pdf_path,
+        #         pages=str(page),
+        #         flavor="stream",
+        #         table_areas=[area_str],
+        #     )
 
-        # Final validation (after giving stream a chance)
-        if df.shape[1] != expected_cols:
-            raise ValueError(
-                f"Template A extraction failed validation: expected {expected_cols} columns, "
-                f"got {df.shape[1]} (page={page}, flavor={flavor}, area={area_str})."
-            )
+        #     stream_kwargs["split_text"] = True
+
+        #     columns_preview = tmpl.get("columns_preview")
+        #     if columns_preview:
+        #         cols = [
+        #             str(float(x))
+        #             for x in self._parse_csv_floats(columns_preview, expected_n=expected_cols - 1)
+        #         ]
+        #         stream_kwargs["columns"] = [",".join(cols)]
+
+        #     # stream_tables = camelot.read_pdf(**stream_kwargs)
+        #     stream_kwargs["split_text"] = False
+        #     stream_tables = camelot.read_pdf(**stream_kwargs)
+
+        #     # If you get the right number of cols, accept it.
+        #     if stream_tables.n > 0:
+        #         best_stream = max(stream_tables, key=lambda t: int(t.shape[0]) * int(t.shape[1]))
+        #         df_stream = best_stream.df
+        #         if df_stream.shape[1] == expected_cols:
+        #             df = df_stream
+        #         else:
+        #             # 2) Only if you *still* need it, try split_text=True
+        #             stream_kwargs["split_text"] = True
+        #             stream_tables2 = camelot.read_pdf(**stream_kwargs)
+        #             if stream_tables2.n > 0:
+        #                 best_stream2 = max(stream_tables2, key=lambda t: int(t.shape[0]) * int(t.shape[1]))
+        #                 df_stream2 = best_stream2.df
+        #                 if df_stream2.shape[1] == expected_cols:
+        #                     df = df_stream2
+
+        # # Final validation (after giving stream a chance)
+        # if df.shape[1] != expected_cols:
+        #     raise ValueError(
+        #         f"Template A extraction failed validation: expected {expected_cols} columns, "
+        #         f"got {df.shape[1]} (page={page}, flavor={flavor}, area={area_str})."
+        #     )
 
         # Assign canonical column names
         df.columns = [
@@ -1463,4 +1576,52 @@ class TableHelper:
         df = self._clean_service_component_table(df)
 
         return df
+    
+    def extract_service_component_tables_template_a_from_list(
+        self,
+        pdf_path: str,
+        pages: list[int],
+        config: dict,
+    ) -> pd.DataFrame:
+        """
+        Extract Template A (6-column) service component tables for multiple pages and combine results.
+
+        This is a thin wrapper around `extract_service_component_table_template_a`, intended for
+        batch extraction once single-page behavior is validated.
+
+        Args:
+            pdf_path: Path to the PDF file.
+            pages: List of Camelot 1-based page numbers to extract.
+            config: Loaded YAML config dict containing `service_component_table_areas`.
+
+        Returns:
+            Combined DataFrame with two extra columns:
+            - source_page: int (Camelot 1-based page)
+            - has_glosas: bool (True if 'GLOSAS' was detected/cropped on that page)
+        """
+        dfs: list[pd.DataFrame] = []
+
+        for p in pages:
+            df = self.extract_service_component_table_template_a(
+                pdf_path=pdf_path,
+                page=p,
+                config=config,
+            )
+
+            # Add provenance
+            df = df.copy()
+            df["source_page"] = int(p)
+
+            # If you already log/use glosas_cut_y internally, you can optionally expose it.
+            # For now, infer from content: presence of the glosa multi-value pattern or USD-only lines is not reliable.
+            # Better approach: return has_glosas from the extractor later.
+            df["has_glosas"] = False  # placeholder
+
+            dfs.append(df)
+
+        if not dfs:
+            return pd.DataFrame()
+
+        return pd.concat(dfs, ignore_index=True)
+
 # ---------- END OF SCRIPT ----------

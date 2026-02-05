@@ -33,7 +33,6 @@ def load_yaml(path: str) -> dict:
     with open(path, "r") as f:
         return yaml.safe_load(f)
 
-
 # Function that will be tested
 def test_extract_main_report_header():
     """
@@ -110,6 +109,7 @@ def test_extract_side_report_header_return_list():
     print(side_header_list)
     print("=" * 90)
 
+
 def teset_combined_report_header_return_list():
     yaml_path = "config/chile_pdf.yaml"
     config = load_yaml(yaml_path)
@@ -163,6 +163,41 @@ def test_service_component_table_template_a():
     print(f"Extracted rows={df.shape[0]}, cols={df.shape[1]} from page={page}")
 
 
+def test_sc_table_template_a_from_list():
+    """
+    Testing extraction of service component table template A
+    page-by-page with readable terminal output.
+    """
+    yaml_path = "config/chile_pdf.yaml"
+    config = load_yaml(yaml_path)
+    pdf_path = "data/chile_budget_2025.pdf"
+    pages = [554, 559, 565,582]
+
+    helper = TableHelper()
+
+    for page in pages:
+        print("\n" + "=" * 80)
+        print(f"PAGE {page} — SERVICE COMPONENT TABLE (TEMPLATE A)")
+        print("=" * 80)
+
+        try:
+            df = helper.extract_service_component_table_template_a(
+                pdf_path=pdf_path,
+                page=page,
+                config=config,
+            )
+
+            print(df)
+            print(
+                f"\nExtracted rows={df.shape[0]}, cols={df.shape[1]} "
+                f"from page={page}"
+            )
+
+        except Exception as e:
+            print(f"\n FAILED on page {page}")
+            print(e)
+
+
 # Primary Orchestration/Execution Function 
 # This is the main function that will be executed when the script runs
 def execute_tests() -> None:
@@ -183,8 +218,11 @@ def execute_tests() -> None:
     # print("\n-------- TESTING EXTRACT COMBINED REPORT HEADER RETURN LIST FUNCTION --------\n")
     # teset_combined_report_header_return_list()
 
-    print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE A FUNCTION --------\n")
-    test_service_component_table_template_a()
+    # print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE A FUNCTION --------\n")
+    # test_service_component_table_template_a()
+
+    print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE A FROM LIST FUNCTION --------\n")
+    test_sc_table_template_a_from_list()
     
 
 
