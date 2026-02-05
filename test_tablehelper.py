@@ -22,6 +22,12 @@ import yaml
 # Specialty/Custom Packages
 from tablehelper import TableHelper
 
+# Pandas display options
+pd.set_option("display.max_rows", 100)
+pd.set_option("display.max_colwidth", 60)
+pd.set_option("display.width", 140)
+
+
 # YAML Loader function
 def load_yaml(path: str) -> dict:
     with open(path, "r") as f:

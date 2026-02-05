@@ -601,6 +601,85 @@ class TableHelper:
         return f"{x1},{y1},{x2},{y2}"
     
 
+    @staticmethod
+    def _clean_service_component_table(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Clean and normalize a service component table for readability.
+
+        What this does:
+        - Strips whitespace and collapses repeated spaces/newlines.
+        - Replaces empty strings with None.
+        - Drops footer artifacts (e.g., a lone page number like "543").
+        - Merges "continuation-only" rows (wrapped/hyphenated denominaciones lines) into
+        the previous row's denominaciones.
+
+        Args:
+            df: Raw extracted DataFrame.
+
+        Returns:
+            Cleaned DataFrame.
+        """
+        df = df.copy()
+
+        # Normalize whitespace / empty values
+        for col in df.columns:
+            df[col] = (
+                df[col]
+                .astype(str)
+                .str.replace(r"\s+", " ", regex=True)
+                .str.strip()
+                .replace({"": None, "nan": None, "None": None})
+            )
+
+        # Drop rows that look like a lone page number in 'denominaciones'
+        if "denominaciones" in df.columns:
+            other_cols = [c for c in df.columns if c != "denominaciones"]
+            mask_page_num = (
+                df["denominaciones"].str.fullmatch(r"\d{2,4}", na=False)
+                & df[other_cols].isna().all(axis=1)
+            )
+            df = df.loc[~mask_page_num].reset_index(drop=True)
+
+        # Merge continuation-only rows into the previous row's denominaciones
+        required = {"sub_titulo", "item_asig", "denominaciones", "glosa_no", "monto_clp_miles", "monto_usd_miles"}
+        if required.issubset(df.columns):
+            rows = []
+            i = 0
+            while i < len(df):
+                cur = df.iloc[i].to_dict()
+
+                is_continuation_only = (
+                    cur.get("denominaciones") is not None
+                    and cur.get("sub_titulo") is None
+                    and cur.get("item_asig") is None
+                    and cur.get("glosa_no") is None
+                    and cur.get("monto_clp_miles") is None
+                    and cur.get("monto_usd_miles") is None
+                )
+
+                if is_continuation_only and rows:
+                    prev = rows[-1]
+                    prev_text = prev.get("denominaciones") or ""
+                    cur_text = cur.get("denominaciones") or ""
+
+                    # If previous ends with a hyphen, remove hyphen and join directly
+                    if prev_text.endswith("-"):
+                        prev["denominaciones"] = (prev_text[:-1] + cur_text).strip()
+                    else:
+                        prev["denominaciones"] = (prev_text + " " + cur_text).strip()
+
+                    i += 1
+                    continue
+
+                rows.append(cur)
+                i += 1
+
+            df = pd.DataFrame(rows, columns=df.columns)
+
+        return df
+
+
+
     # ---------- CORE FUNCTIONS SECTION  ----------
     # Function that only extracts the main report header of each page 
     def extract_main_report_header(
@@ -1068,7 +1147,7 @@ class TableHelper:
             )
 
             stream_kwargs["split_text"] = True
-            
+
             columns_preview = tmpl.get("columns_preview")
             if columns_preview:
                 cols = [
@@ -1092,6 +1171,20 @@ class TableHelper:
                 f"got {df.shape[1]} (page={page}, flavor={flavor}, area={area_str})."
             )
 
+        # Assign canonical column names
+        df.columns = [
+            "sub_titulo",
+            "item_asig",
+            "denominaciones",
+            "glosa_no",
+            "moneda_nacional_miles_de_$CLP",
+            "moneda_ext_convertida_miles_USD",
+        ]
+
+        # Clean / normalize text for readability
+        df = self._clean_service_component_table(df)
+
         return df
+
 
 # ---------- END OF SCRIPT ----------
