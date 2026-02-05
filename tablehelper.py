@@ -30,12 +30,16 @@ CONCEPTUAL PROCESS:
 
 # Standard Imports
 import camelot
+import fitz  # pyright: ignore[reportPrivateImportUsage]
+import logging
 import pandas as pd
 from typing import Any, Optional, List, Dict, Tuple, Union
 import re
 
 # Specialty/Custom Libraries
 
+
+logger = logging.getLogger(__name__)
 HeaderValue = Union[str,List[str], int, None]
 Number = Union[int, float]
 
@@ -676,7 +680,204 @@ class TableHelper:
             df = pd.DataFrame(rows, columns=df.columns)
 
         return df
+    
+    
+    # ---------- GLOSAS TABLE EXTRACTION HELPER FUNCTIONS SECTION ----------
+    @staticmethod
+    def _parse_camelot_area(area_str: str) -> tuple[float, float, float, float]:
+        """
+        Parse a Camelot table_areas bbox string into floats.
 
+        Args:
+            area_str: Camelot bbox string formatted as "x1,y1,x2,y2".
+
+        Returns:
+            Tuple of (x1, y1, x2, y2) as floats.
+
+        Raises:
+            ValueError: If the string is not 4 comma-separated numbers.
+        """
+        parts = [p.strip() for p in area_str.split(",")]
+        if len(parts) != 4:
+            raise ValueError(f"Expected 4 comma-separated values for area_str, got {len(parts)}: {area_str!r}")
+        try:
+            x1, y1, x2, y2 = (float(p) for p in parts)
+        except ValueError as e:
+            raise ValueError(f"Could not parse floats from area_str={area_str!r}") from e
+        return x1, y1, x2, y2
+
+    @staticmethod
+    def _format_camelot_area(x1: float, y1: float, x2: float, y2: float) -> str:
+        """
+        Format floats into Camelot bbox string.
+
+        Args:
+            x1: Left.
+            y1: Bottom.
+            x2: Right.
+            y2: Top.
+
+        Returns:
+            Camelot bbox string: "x1,y1,x2,y2".
+        """
+        return f"{x1},{y1},{x2},{y2}"
+
+    def _find_glosas_bbox_and_table_only_area(
+        self,
+        pdf_path: str,
+        camelot_page: int,
+        base_table_area_str: str,
+        *,
+        page_height: float,
+        keyword: str = "GLOSAS",
+        x_min: float = 0.0,
+        x_max: float = 200.0,
+        pad_points: float = 8.0,
+    ) -> tuple[str, float | None]:
+        """
+        Find the 'GLOSAS' heading on a PDF page using PyMuPDF, convert its coordinates for Camelot,
+        and return a new Camelot bbox string that excludes the Glosas section (table-only region).
+
+        This is designed for pages where the main budget table and the Glosas section appear on the
+        same page. The main table is above the Glosas heading. We:
+          1) Search for the exact heading text (default: "GLOSAS") using PyMuPDF.
+          2) Convert the found text rectangle's Y coordinate from PyMuPDF space (top-left origin)
+             to PDF/Camelot space (bottom-left origin) using the page height.
+          3) Adjust the *bottom* (y1) of the provided `base_table_area_str` so the table bbox ends
+             just above the Glosas heading.
+
+        Coordinate notes (important):
+            - PyMuPDF returns rectangles in a coordinate space where Y grows downward from the top.
+            - Camelot/PDF coordinates use bottom-left origin where Y grows upward.
+            - Conversion: pdf_y = page_height - pymupdf_y
+
+        Page numbering notes:
+            - Camelot pages are 1-based.
+            - PyMuPDF pages are 0-based.
+            - This function expects `camelot_page` (1-based) and converts internally.
+
+        Args:
+            pdf_path: Path to the PDF file.
+            camelot_page: Page number in Camelot terms (1-based).
+            base_table_area_str: Camelot bbox string "x1,y1,x2,y2" for a region that may include Glosas.
+            page_height: Page height in points (e.g., 751.19). Must match the target page.
+            keyword: Text to search for. Default "GLOSAS" (all caps).
+            x_min: Optional left bound filter in PyMuPDF coords to reduce false matches.
+            x_max: Optional right bound filter in PyMuPDF coords to reduce false matches.
+            pad_points: Padding (in points) added above the Glosas heading when cropping the table-only bbox.
+
+        Returns:
+            (new_table_area_str, glosas_cut_y_pdf)
+            - new_table_area_str: Camelot bbox string for the table-only region. If keyword not found,
+              returns `base_table_area_str` unchanged.
+            - glosas_cut_y_pdf: The computed cut line in PDF/Camelot Y coords (float), or None if not found.
+
+        Raises:
+            ValueError: If `base_table_area_str` is malformed.
+            RuntimeError: If the requested page index is out of bounds.
+        """
+        x1, y1, x2, y2 = self._parse_camelot_area(base_table_area_str)
+
+        # Convert Camelot page (1-based) to PyMuPDF page index (0-based)
+        page_index = int(camelot_page) - 1
+        if page_index < 0:
+            raise RuntimeError(f"Invalid camelot_page={camelot_page}; must be >= 1")
+
+        with fitz.open(pdf_path) as doc:
+            if page_index >= doc.page_count:
+                raise RuntimeError(
+                    f"camelot_page={camelot_page} is out of range for this PDF "
+                    f"(doc has {doc.page_count} pages; max camelot_page={doc.page_count})."
+                )
+
+            page = doc[page_index]
+
+            # Find all occurrences of the keyword on the page
+            rects = page.search_for(keyword)
+
+            if not rects:
+                # No glosas heading found; return unchanged
+                return base_table_area_str, None
+
+            # Filter matches by expected X region (helps prevent false positives)
+            candidates = [r for r in rects if (r.x0 >= x_min and r.x0 <= x_max)]
+            if not candidates:
+                candidates = rects  # fallback: use any match if X-filter removes all
+
+            # Choose the "best" match:
+            # - typically, the title "GLOSAS" is a standalone heading, so pick the leftmost/topmost candidate.
+            # - prioritize smallest x0 (left margin), then smallest y0 (higher on page).
+            best = sorted(candidates, key=lambda r: (r.x0, r.y0))[0]
+
+            # PyMuPDF y0 is top of the rectangle in top-left origin space
+            glosas_y_pdf = float(page_height) - float(best.y0)
+
+        # If the glosas cut line is within our base bbox vertical span, crop the bottom upward.
+        # Camelot expects y1 < y2; increasing y1 makes the bbox shorter (removes lower content).
+        if y1 < glosas_y_pdf < y2:
+            new_y1 = max(y1, glosas_y_pdf + float(pad_points))
+            new_area = self._format_camelot_area(x1, new_y1, x2, y2)
+            return new_area, glosas_y_pdf
+
+        # If the match is outside the bbox span, leave unchanged (likely bbox already excludes it)
+        return base_table_area_str, glosas_y_pdf
+
+
+    def _crop_table_area_above_glosas(
+        self,
+        pdf_path: str,
+        camelot_page: int,
+        base_table_area_str: str,
+        *,
+        page_height: float,
+        pad_points: float = 8.0,
+    ) -> tuple[str, float | None]:
+        """
+        Find the 'GLOSAS' heading on a page (PyMuPDF), convert coordinates to PDF/Camelot space,
+        and crop a Camelot table_areas bbox so it excludes the Glosas section.
+
+        Args:
+            pdf_path: Path to PDF.
+            camelot_page: 1-based page number (Camelot convention).
+            base_table_area_str: Camelot bbox string "x1,y1,x2,y2" (PDF coords, origin bottom-left).
+            page_height: Page height in points.
+            pad_points: Extra padding above the GLOSAS heading to avoid clipping the last table row.
+
+        Returns:
+            (new_table_area_str, glosas_cut_y_pdf)
+            - new_table_area_str: Cropped bbox string. Unchanged if GLOSAS not found.
+            - glosas_cut_y_pdf: Y coordinate (PDF/Camelot space) of the top of the GLOSAS heading, or None.
+        """
+        x1, y1, x2, y2 = (float(v.strip()) for v in base_table_area_str.split(","))
+
+        page_index = camelot_page - 1
+        if page_index < 0:
+            raise ValueError("camelot_page must be >= 1")
+
+        with fitz.open(pdf_path) as doc:
+            page = doc.load_page(page_index)
+
+            # Try a couple common variants
+            rects = page.search_for("GLOSAS :")
+            if not rects:
+                rects = page.search_for("GLOSAS:")
+
+            if not rects:
+                return base_table_area_str, None
+
+            # If multiple matches, pick the leftmost/topmost
+            rect = sorted(rects, key=lambda r: (r.x0, r.y0))[0]
+
+            # Convert PyMuPDF y0 (top-origin) to PDF y (bottom-origin)
+            glosas_cut_y_pdf = float(page_height) - float(rect.y0)
+
+        # Crop only if the cut falls inside the bbox vertical span
+        if y1 < glosas_cut_y_pdf < y2:
+            new_y1 = max(y1, glosas_cut_y_pdf + pad_points)
+            new_area = f"{x1},{new_y1},{x2},{y2}"
+            return new_area, glosas_cut_y_pdf
+
+        return base_table_area_str, glosas_cut_y_pdf
 
 
     # ---------- CORE FUNCTIONS SECTION  ----------
@@ -1099,7 +1300,23 @@ class TableHelper:
             height=height,
         )
 
-        # Build kwargs so we can optionally add explicit column boundaries
+
+        area_str, glosas_cut_y = self._crop_table_area_above_glosas(
+            pdf_path=pdf_path,
+            camelot_page=int(page),
+            base_table_area_str=area_str,
+            page_height=float(page_height),
+        )
+        if glosas_cut_y is not None:
+            logger.debug(f"GLOSAS detected on page {page} at y={glosas_cut_y}")
+
+        columns_key = "columns_preview_glosas" if glosas_cut_y is not None else "columns_preview_full"
+        columns_preview = tmpl.get(columns_key)
+
+        # If this is a "glosas page", lattice often over-splits columns. Prefer stream first.
+        if glosas_cut_y is not None:
+            flavor = "stream"
+
         kwargs = dict(
             filepath=pdf_path,
             pages=str(page),
@@ -1107,31 +1324,81 @@ class TableHelper:
             table_areas=[area_str],
         )
 
-        columns_preview = tmpl.get("columns_preview")
-        if columns_preview and flavor == "stream":
+        if flavor == "stream" and columns_preview:
             cols = [
                 str(float(x))
                 for x in self._parse_csv_floats(columns_preview, expected_n=expected_cols - 1)
             ]
             kwargs["columns"] = [",".join(cols)]
+            kwargs["split_text"] = False
 
-        tables = camelot.read_pdf(**kwargs)
+        if columns_preview and flavor == "stream":
+            cols = [str(float(x)) for x in self._parse_csv_floats(columns_preview, expected_n=expected_cols - 1)]
+            kwargs["columns"] = [",".join(cols)]
+ 
+        def _best_table(tables):
+            return max(tables, key=lambda t: int(t.shape[0]) * int(t.shape[1]))
 
-
-        if tables.n == 0 and flavor == "lattice":
-            # Fallback: sometimes lines aren't detected even though the table is visible
-            tables = camelot.read_pdf(
-                pdf_path,
+        def _read_stream(area_str: str, columns_preview: str | None):
+            stream_kwargs = dict(
+                filepath=pdf_path,
                 pages=str(page),
                 flavor="stream",
                 table_areas=[area_str],
+                split_text=False,
             )
+            if columns_preview:
+                cols = [
+                    str(float(x))
+                    for x in self._parse_csv_floats(
+                        columns_preview, expected_n=expected_cols - 1
+                    )
+                ]
+                stream_kwargs["columns"] = [",".join(cols)]
+            return camelot.read_pdf(**stream_kwargs)
+
+        # Decide which column layout to use
+        columns_key = (
+            "columns_preview_glosas"
+            if glosas_cut_y is not None
+            else "columns_preview_full"
+        )
+        columns_preview = tmpl.get(columns_key)
+
+        # ---- Extraction strategy ----
+        if glosas_cut_y is not None:
+            # GLOSAS pages: stream first (deterministic)
+            tables = _read_stream(area_str, columns_preview)
+        else:
+            # Non-GLOSAS pages: try lattice first
+            tables = camelot.read_pdf(
+                filepath=pdf_path,
+                pages=str(page),
+                flavor="lattice",
+                table_areas=[area_str],
+            )
+
+            # Validate lattice result
+            if tables.n == 0:
+                tables = _read_stream(area_str, columns_preview)
+            else:
+                df_try = _best_table(tables).df
+                if df_try.shape[1] != expected_cols:
+                    tables = _read_stream(area_str, columns_preview)
 
         if tables.n == 0:
             raise RuntimeError(
-                f"No tables found by Camelot on page={page} using table_area={area_str} "
-                f"(template_a_with_usd)."
+                f"No tables found by Camelot on page={page} using area={area_str}."
             )
+
+        df = _best_table(tables).df
+
+        if df.shape[1] != expected_cols:
+            raise ValueError(
+                f"Template A extraction failed validation: expected {expected_cols} columns, "
+                f"got {df.shape[1]} (page={page}, area={area_str})."
+            )
+
 
         best = max(tables, key=lambda t: int(t.shape[0]) * int(t.shape[1]))
         df = best.df
@@ -1155,13 +1422,25 @@ class TableHelper:
                 ]
                 stream_kwargs["columns"] = [",".join(cols)]
 
+            # stream_tables = camelot.read_pdf(**stream_kwargs)
+            stream_kwargs["split_text"] = False
             stream_tables = camelot.read_pdf(**stream_kwargs)
 
+            # If you get the right number of cols, accept it.
             if stream_tables.n > 0:
                 best_stream = max(stream_tables, key=lambda t: int(t.shape[0]) * int(t.shape[1]))
                 df_stream = best_stream.df
                 if df_stream.shape[1] == expected_cols:
-                    df = df_stream  # accept stream result
+                    df = df_stream
+                else:
+                    # 2) Only if you *still* need it, try split_text=True
+                    stream_kwargs["split_text"] = True
+                    stream_tables2 = camelot.read_pdf(**stream_kwargs)
+                    if stream_tables2.n > 0:
+                        best_stream2 = max(stream_tables2, key=lambda t: int(t.shape[0]) * int(t.shape[1]))
+                        df_stream2 = best_stream2.df
+                        if df_stream2.shape[1] == expected_cols:
+                            df = df_stream2
 
         # Final validation (after giving stream a chance)
         if df.shape[1] != expected_cols:
@@ -1184,6 +1463,4 @@ class TableHelper:
         df = self._clean_service_component_table(df)
 
         return df
-
-
 # ---------- END OF SCRIPT ----------

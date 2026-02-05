@@ -8,7 +8,8 @@ service_component_table_areas:
     page_height: 751.19
     table_area_preview: "60.89,170,425.39,560"
     expected_cols: 6
-    columns_preview: "91.66,130.72,314.33,348.36,416.69"
+    columns_preview_full: "91.66,130.72,314.33,348.36,416.69"
+    columns_preview_glosas: "67.15,105.91,291.07,325.43,393.35"
 
   template_b_no_usd:
     page_height: 751.19
