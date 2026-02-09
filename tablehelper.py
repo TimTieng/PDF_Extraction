@@ -30,7 +30,7 @@ CONCEPTUAL PROCESS:
 
 # Standard Imports
 import camelot
-import fitz  # pyright: ignore[reportPrivateImportUsage]
+import pymupdf
 import logging
 import pandas as pd
 from typing import Any, Optional, List, Dict, Tuple, Union
@@ -103,6 +103,7 @@ class TableHelper:
 
         return lines
     
+
     def _clean_lines(self, text: str) -> List[str]:
         """
         PURPOSE:
@@ -123,6 +124,7 @@ class TableHelper:
 
         return out
  
+
     def _find_line_index(self, lines: List[str], pattern: str) -> Optional[int]:
         """
         PURPOSE:
@@ -143,6 +145,7 @@ class TableHelper:
 
         return None
  
+
     def _skip_side_header_line(self, line: str) -> bool:
         """
         PURPOSE:
@@ -224,6 +227,7 @@ class TableHelper:
         """
         return re.sub(r"\s+", " ", (s or "").strip())
  
+
     def _extract_labeled_value(self, text: str, label_pattern: str) -> Optional[str]:
         """
         PURPOSE:
@@ -535,6 +539,7 @@ class TableHelper:
                 merged.append(line)
 
         return merged
+    
 
     # ---------- SERVICE COMPONENT TABLE EXTRACTION HELPER FUNCTIONS SECTION ----------
     @staticmethod
@@ -602,7 +607,6 @@ class TableHelper:
         y2 = float(page_height) - float(top) + pad
 
         return f"{x1},{y1},{x2},{y2}"
-    
 
     @staticmethod
     def _clean_service_component_table(df: pd.DataFrame) -> pd.DataFrame:
@@ -783,7 +787,7 @@ class TableHelper:
         if page_index < 0:
             raise RuntimeError(f"Invalid camelot_page={camelot_page}; must be >= 1")
 
-        with fitz.open(pdf_path) as doc:
+        with pymupdf.open(pdf_path) as doc:
             if page_index >= doc.page_count:
                 raise RuntimeError(
                     f"camelot_page={camelot_page} is out of range for this PDF "
@@ -854,7 +858,7 @@ class TableHelper:
         if page_index < 0:
             raise ValueError("camelot_page must be >= 1")
 
-        with fitz.open(pdf_path) as doc:
+        with pymupdf.open(pdf_path) as doc:
             page = doc.load_page(page_index)
 
             # Try a couple common variants
@@ -877,8 +881,7 @@ class TableHelper:
             new_area = f"{x1},{new_y1},{x2},{y2}"
             return new_area, glosas_cut_y_pdf
 
-        return base_table_area_str, glosas_cut_y_pdf
-
+        return base_table_area_str, None
 
     @staticmethod
     def _score_template_a_alignment(df: pd.DataFrame) -> int:
@@ -945,7 +948,6 @@ class TableHelper:
         score -= 10 * (1 if (usd_nonempty > clp_nonempty and clp_nonempty < 3) else 0)
 
         return int(score)
-
 
 
     # ---------- CORE FUNCTIONS SECTION  ----------
@@ -1378,7 +1380,7 @@ class TableHelper:
         if glosas_cut_y is not None:
             logger.debug(f"GLOSAS detected on page {page} at y={glosas_cut_y} (cropping financial table only)")
 
-        # IMPORTANT: For Template A financial tables, ALWAYS use FULL column cuts.
+        # IMPORTANT: For Template A financial tables (6 Columns), ALWAYS use FULL column cuts.
         columns_full = tmpl.get("columns_preview_full")
 
         def _best_table(tables):
@@ -1388,6 +1390,7 @@ class TableHelper:
             if tables_ is None:
                 return pd.DataFrame()
 
+            # get camelots .n attribute (number of tables)
             n = getattr(tables_, "n", None)
             if n is not None:
                 return pd.DataFrame() if n == 0 else _best_table(tables_).df
@@ -1430,10 +1433,8 @@ class TableHelper:
             shifted = [xs[0]] + [float(x) + float(delta) for x in xs[1:]]
             return ",".join(str(x) for x in shifted)
 
-
-
         # ---- Extraction strategy ----
-        # Keep your original behavior for "normal" pages (lattice first),
+        # Keep original behavior for "normal" pages (lattice first),
         # but ALWAYS score/choose final output from stream with FULL cuts (and small deltas if needed).
         if glosas_cut_y is None:
             tables = camelot.read_pdf(
