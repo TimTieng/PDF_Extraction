@@ -1,6 +1,7 @@
 """
 CREATED: 30 JAN 2026
-UPDATED 05 FEB 2026
+AUTHOR: @GAMBIT
+JIRA TICKET: TBD
 
 PURPOSE:
     The TableHelper Class will contain several methods and helper functions to assist in structuring and formatting table content 
@@ -33,15 +34,14 @@ import camelot
 import pymupdf
 import logging
 import pandas as pd
-from typing import Any, Optional, List, Dict, Tuple, Union
+from typing import Any, Optional, List, Dict, Tuple,Union
 import re
 
 # Specialty/Custom Libraries
 
-
 logger = logging.getLogger(__name__)
 HeaderValue = Union[str,List[str], int, None]
-Number = Union[int, float]
+Number = Union[int,float]
 
 class TableHelper:
     """
@@ -79,7 +79,6 @@ class TableHelper:
         RETURNS:
             A list of non-empty text lines extracted from the grid, in reading order.
         """
-
         lines: List[str] = []
 
         # Row-major traversal; join non-empty cells per row
@@ -226,7 +225,7 @@ class TableHelper:
         A string with collapsed spaces and trimmed ends.
         """
         return re.sub(r"\s+", " ", (s or "").strip())
- 
+
 
     def _extract_labeled_value(self, text: str, label_pattern: str) -> Optional[str]:
         """
@@ -257,6 +256,7 @@ class TableHelper:
         # Most are 2-digit (01, 11, 19). Keep 3-digit as-is.
         return val.zfill(2) if len(val) <= 2 else val
     
+
     # Created specifically for PDF Page 713 Ministry of work and labor services (multi-line Ministry)
     def _is_ministry_continuation(self, line: str) -> bool:
         """
@@ -320,7 +320,6 @@ class TableHelper:
             New list with duplicates removed (order preserved).
         """
         seen = set()
-
         out = []
 
         for s in lines:
@@ -333,6 +332,7 @@ class TableHelper:
             out.append(key)
         return out
  
+
     # Added Specifically for Servicsion hidrografico y oceanogrico de la armada de chile
     def _split_repeated_wrapped_header_blocks(
         self,
@@ -379,7 +379,6 @@ class TableHelper:
                 (service_component, sub_component)
             Each value may be None if not confidently detected.
         """
-    
         def _norm(s: str) -> str:
             """Normalize text for comparison (casefold + collapsed whitespace)."""
             return self._normalize_whitespace(s or "").strip().casefold()
@@ -414,6 +413,7 @@ class TableHelper:
     
         return service_component, sub_component
 
+
     # DEBUG ADD- fixes when terminal outputs sub_component with spaces ebtween each character
     def _despace_letter_runs(self, s: str) -> str:
         """
@@ -446,124 +446,87 @@ class TableHelper:
     
         flush_run()
         return " ".join(out)
-    
+
+
     @staticmethod
     def _looks_like_continuation(curr: str, prev: str) -> bool:
         """
-        Determine whether a line of header text is a wrapped continuation of the
-        previous line.
-
-        This helper is used during PDF header reconstruction to detect cases where
-        a logical header line has been visually wrapped across multiple lines by
-        the PDF layout engine (e.g., long parenthetical lists of codes).
-
-        The heuristic is intentionally conservative to avoid false positives.
-        A line is considered a continuation only when:
-            - The previous line appears "open" (e.g., ends with a comma, hyphen,
-            or contains an unclosed parenthesis), AND
-            - The current line consists primarily of digits and/or punctuation
-            (e.g., numeric lists, closing parentheses).
-
-        This approach favors preserving original header structure over aggressive
-        merging, reducing the risk of combining unrelated header fields.
-
-        Parameters
-        ----------
-        curr : str
-            The current line being evaluated.
-        prev : str
-            The previous header line already captured.
-
-        Returns
-        -------
-        bool
-            True if the current line should be merged into the previous line as a
-            wrapped continuation; False otherwise.
+        PURPOSE:
+            To Determine whether a header line is a wrapped continuation of the previous line. This occurs several times in the chile pdf
+            when a Service component is so long that it goes to the next line/row. 
+        
+        PARAMETERS:
+            - curr: the current line that is being evaluated
+            - prev: the previous header line that was already captured in a data object
+        
+        RETURNS:
+            Bool: True if the current line should be merged into the previos line as a wrapped continuation, or false
         """
         c = curr.strip()
         p = prev.strip()
-        # If previous line looks "open" (wrap/continuation likely)
+
+        # If previous looks open or a likely text wrapping occured
         prev_open = (
             p.endswith(",")
             or (p.count("(") > p.count(")"))
             or p.endswith("-")
         )
 
-        # Current line is mostly "continuation-ish" (numbers/punct/closing paren)
+        # Current line is most likely a continutation (numbers/ punctuation or closing parenthesis)
         cont_like = (
-            bool(re.match(r"^[\d\W]+$", c))  # digits/punctuation only
-            or bool(re.match(r"^[\)\],;\.\s]+", c))
-            or bool(re.match(r"^[\d]{1,2}\b", c))  # starts with a number
+            bool(re.match(r"^[\d\W]+$", c))
+            or bool(re.match(r"^[\)\],;\.s]+", c))
+            or bool(re.match(r"^[\d]{1,2}\b", c))
         )
-
         return prev_open and cont_like
     
 
     @classmethod
     def _merge_continuations(cls, lines: List[str]) -> List[str]:
         """
-        Merge wrapped continuation lines in a sequence of extracted header lines.
-
-        This method reconstructs logical header lines that were split across
-        multiple visual lines in the source PDF. It relies on
-        `_looks_like_continuation` to conservatively identify continuation patterns
-        and merge them into a single coherent line.
-
-        The merge is performed left-to-right, preserving original order and spacing.
-        Lines that do not meet the continuation criteria are left unchanged.
-
-        This function is intended to operate on already-filtered header text
-        (e.g., main report header lines) prior to semantic parsing into specific
-        header fields.
-
-        Parameters
-        ----------
-        lines : List[str]
-            A list of extracted header lines in document order.
-
-        Returns
-        -------
-        List[str]
-            A new list of header lines with wrapped continuations merged into their
-            preceding lines.
+        PURPOSE: 
+            Merged wrapped continution lines in a seqwuence of extracted header lines. This method aims to reconstruct
+            logical main header report lines that were split across multiple lines/rows. This is heavily reliant on _looks_like_continuation()
+            The merge is performed Left to Right as yo uwill see via the splitting mechanism (lstrip and rstrip)
+        
+        PARAMETERS:
+            lines: a list of extracted header lines in document order
+        
+        RETURNS:
+            list[str]: a new list of header lines with wrapped continuations merged into their precedinglines
         """
         merged: List[str] = []
         for line in lines:
             if not merged:
                 merged.append(line)
                 continue
-
-            if cls._looks_like_continuation(line, merged[-1]):
+            if cls._looks_like_continuation(line,merged[-1]):
                 merged[-1] = f"{merged[-1].rstrip()} {line.lstrip()}"
             else:
                 merged.append(line)
-
         return merged
-    
 
-    # ---------- SERVICE COMPONENT TABLE EXTRACTION HELPER FUNCTIONS SECTION ----------
+    # ---------- SERVICE COMPONENT TABLE EXTRACTION HELPER FUNCTIONS SECTION ---------------
     @staticmethod
-    def _parse_csv_floats(value: str, *, expected_n: int) -> Tuple[float, ...]:
+    def _parse_csv_floats(value:str, *, expected_n: int) -> Tuple[float,...]:
         """
-        Parse a comma-separated string of numbers into floats.
-
-        Args:
-            value: String containing comma-separated numeric values (e.g., "1.0,2.0,3.0,4.0").
-            expected_n: Expected number of numeric values.
-
-        Returns:
-            A tuple of floats of length `expected_n`.
-
-        Raises:
-            ValueError: If the number of values does not match `expected_n` or parsing fails.
+        Docstring for _parse_csv_floats
+        
+        :param value: Description
+        :type value: str
+        :param expected_n: Description
+        :type expected_n: int
+        :return: Description
+        :rtype: Tuple[float, ...]
         """
-        parts = [p.strip() for p in value.split(",")]
+        parts = [p.strip() for p in value.split(',')]
         if len(parts) != expected_n:
-            raise ValueError(f"Expected {expected_n} comma-separated values, got {len(parts)}: {value!r}")
+            raise ValueError(f"Expected: {expected_n} comma-separated values got {len(parts)}: {value!r}")
         try:
             return tuple(float(p) for p in parts)
         except ValueError as e:
             raise ValueError(f"Could not parse floats from {value!r}") from e
+    
 
     @staticmethod
     def _preview_bbox_to_camelot_area(
@@ -573,34 +536,29 @@ class TableHelper:
         top: Number,
         width: Number,
         height: Number,
-        pad: float = 10.0,
-    ) -> str:
+        pad: float = 10.0
+    )-> str:
         """
-        Convert a macOS Preview selection (origin top-left) into a Camelot `table_areas` string.
-
-        Preview selection format:
-            left, top, width, height
-            - Origin is top-left
-            - Y increases downward
-
-        Camelot/PDF coordinate format:
-            x1, y1, x2, y2
-            - Origin is bottom-left
-            - Y increases upward
-
-        Args:
-            page_height: PDF page height in points (from the PDF MediaBox).
-            left: Preview selection left (points).
-            top: Preview selection top (points).
-            width: Preview selection width (points).
-            height: Preview selection height (points).
-
-        Returns:
-            A string formatted as "x1,y1,x2,y2" for Camelot `table_areas`.
+        Docstring for _preview_bbox_to_camelot_area
+        
+        :param page_height: Description
+        :type page_height: Number
+        :param left: Description
+        :type left: Number
+        :param top: Description
+        :type top: Number
+        :param width: Description
+        :type width: Number
+        :param height: Description
+        :type height: Number
+        :param pad: Description
+        :type pad: float
+        :return: Description
+        :rtype: str
         """
         x1 = float(left) - pad
         x2 = float(left) + float(width) + pad
-        
+
         preview_bottom = float(top) + float(height)
 
         y1 = float(page_height) - preview_bottom - pad
@@ -610,25 +568,10 @@ class TableHelper:
 
     @staticmethod
     def _clean_service_component_table(df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Clean and normalize a service component table for readability.
-
-        What this does:
-        - Strips whitespace and collapses repeated spaces/newlines.
-        - Replaces empty strings with None.
-        - Drops footer artifacts (e.g., a lone page number like "543").
-        - Merges "continuation-only" rows (wrapped/hyphenated denominaciones lines) into
-        the previous row's denominaciones.
-
-        Args:
-            df: Raw extracted DataFrame.
-
-        Returns:
-            Cleaned DataFrame.
-        """
         df = df.copy()
 
-        # Normalize whitespace / empty values
+        # normalize whitespace and empty values as seen in the pdf pages
+        # This block is where we assign "None" to all the empty spaces in the PDF page
         for col in df.columns:
             df[col] = (
                 df[col]
@@ -637,18 +580,17 @@ class TableHelper:
                 .str.strip()
                 .replace({"": None, "nan": None, "None": None})
             )
-
-        # Drop rows that look like a lone page number in 'denominaciones'
+        # Drop rows that look like a long page number that aligns with the 'Denominaciones' column in the pdf
         if "denominaciones" in df.columns:
-            other_cols = [c for c in df.columns if c != "denominaciones"]
+            other_cols = [col for col in df.columns if col != 'denominaciones']
             mask_page_num = (
-                df["denominaciones"].str.fullmatch(r"\d{2,4}", na=False)
+                df['denominaciones'].str.fullmatch(r"\d{2,4}", na=False)
                 & df[other_cols].isna().all(axis=1)
             )
             df = df.loc[~mask_page_num].reset_index(drop=True)
 
-        # Merge continuation-only rows into the previous row's denominaciones
-        required = {"sub_titulo", "item_asig", "denominaciones", "glosa_no", "monto_clp_miles", "monto_usd_miles"}
+        # Merge continuation only rows into the previous rows denominaciones column
+        required = {"sub_titulo", "item_asign", "denominaciones", "glosa_no", "moneda_clp_miles", "moneda_ext_usd_miles"}
         if required.issubset(df.columns):
             rows = []
             i = 0
@@ -658,10 +600,10 @@ class TableHelper:
                 is_continuation_only = (
                     cur.get("denominaciones") is not None
                     and cur.get("sub_titulo") is None
-                    and cur.get("item_asig") is None
+                    and cur.get("item_asign") is None
                     and cur.get("glosa_no") is None
-                    and cur.get("monto_clp_miles") is None
-                    and cur.get("monto_usd_miles") is None
+                    and cur.get("moneda_clp_miles") is None
+                    and cur.get("moneda_ext_usd_miles") is None
                 )
 
                 if is_continuation_only and rows:
@@ -669,35 +611,36 @@ class TableHelper:
                     prev_text = prev.get("denominaciones") or ""
                     cur_text = cur.get("denominaciones") or ""
 
-                    # If previous ends with a hyphen, remove hyphen and join directly
+                    # If the previous ends with a hyphen, remove hyphen and join it directly to the preceding text
                     if prev_text.endswith("-"):
-                        prev["denominaciones"] = (prev_text[:-1] + cur_text).strip()
+                        prev['denominaciones'] = (prev_text[:-1] + cur_text).strip()
                     else:
-                        prev["denominaciones"] = (prev_text + " " + cur_text).strip()
-
+                        prev['denominaciones'] = (prev_text + " " + cur_text).strip()
+                    
+                    # Increment
                     i += 1
                     continue
 
                 rows.append(cur)
-                i += 1
+                i+=1
 
-            df = pd.DataFrame(rows, columns=df.columns)
-
+            df = pd.DataFrame(rows,columns=df.columns)
+            
         return df
-    
-    
+
+
     # ---------- GLOSAS TABLE EXTRACTION HELPER FUNCTIONS SECTION ----------
     @staticmethod
     def _parse_camelot_area(area_str: str) -> tuple[float, float, float, float]:
         """
         Parse a Camelot table_areas bbox string into floats.
-
+ 
         Args:
             area_str: Camelot bbox string formatted as "x1,y1,x2,y2".
-
+ 
         Returns:
             Tuple of (x1, y1, x2, y2) as floats.
-
+ 
         Raises:
             ValueError: If the string is not 4 comma-separated numbers.
         """
@@ -709,23 +652,23 @@ class TableHelper:
         except ValueError as e:
             raise ValueError(f"Could not parse floats from area_str={area_str!r}") from e
         return x1, y1, x2, y2
-
+ 
     @staticmethod
     def _format_camelot_area(x1: float, y1: float, x2: float, y2: float) -> str:
         """
         Format floats into Camelot bbox string.
-
+ 
         Args:
             x1: Left.
             y1: Bottom.
             x2: Right.
             y2: Top.
-
+ 
         Returns:
             Camelot bbox string: "x1,y1,x2,y2".
         """
         return f"{x1},{y1},{x2},{y2}"
-
+ 
     def _find_glosas_bbox_and_table_only_area(
         self,
         pdf_path: str,
@@ -741,7 +684,7 @@ class TableHelper:
         """
         Find the 'GLOSAS' heading on a PDF page using PyMuPDF, convert its coordinates for Camelot,
         and return a new Camelot bbox string that excludes the Glosas section (table-only region).
-
+ 
         This is designed for pages where the main budget table and the Glosas section appear on the
         same page. The main table is above the Glosas heading. We:
           1) Search for the exact heading text (default: "GLOSAS") using PyMuPDF.
@@ -749,17 +692,17 @@ class TableHelper:
              to PDF/Camelot space (bottom-left origin) using the page height.
           3) Adjust the *bottom* (y1) of the provided `base_table_area_str` so the table bbox ends
              just above the Glosas heading.
-
+ 
         Coordinate notes (important):
             - PyMuPDF returns rectangles in a coordinate space where Y grows downward from the top.
             - Camelot/PDF coordinates use bottom-left origin where Y grows upward.
             - Conversion: pdf_y = page_height - pymupdf_y
-
+ 
         Page numbering notes:
             - Camelot pages are 1-based.
             - PyMuPDF pages are 0-based.
             - This function expects `camelot_page` (1-based) and converts internally.
-
+ 
         Args:
             pdf_path: Path to the PDF file.
             camelot_page: Page number in Camelot terms (1-based).
@@ -769,64 +712,64 @@ class TableHelper:
             x_min: Optional left bound filter in PyMuPDF coords to reduce false matches.
             x_max: Optional right bound filter in PyMuPDF coords to reduce false matches.
             pad_points: Padding (in points) added above the Glosas heading when cropping the table-only bbox.
-
+ 
         Returns:
             (new_table_area_str, glosas_cut_y_pdf)
             - new_table_area_str: Camelot bbox string for the table-only region. If keyword not found,
               returns `base_table_area_str` unchanged.
             - glosas_cut_y_pdf: The computed cut line in PDF/Camelot Y coords (float), or None if not found.
-
+ 
         Raises:
             ValueError: If `base_table_area_str` is malformed.
             RuntimeError: If the requested page index is out of bounds.
         """
         x1, y1, x2, y2 = self._parse_camelot_area(base_table_area_str)
-
+ 
         # Convert Camelot page (1-based) to PyMuPDF page index (0-based)
         page_index = int(camelot_page) - 1
         if page_index < 0:
             raise RuntimeError(f"Invalid camelot_page={camelot_page}; must be >= 1")
-
+ 
         with pymupdf.open(pdf_path) as doc:
             if page_index >= doc.page_count:
                 raise RuntimeError(
                     f"camelot_page={camelot_page} is out of range for this PDF "
                     f"(doc has {doc.page_count} pages; max camelot_page={doc.page_count})."
                 )
-
+ 
             page = doc[page_index]
-
+ 
             # Find all occurrences of the keyword on the page
             rects = page.search_for(keyword)
-
+ 
             if not rects:
                 # No glosas heading found; return unchanged
                 return base_table_area_str, None
-
+ 
             # Filter matches by expected X region (helps prevent false positives)
             candidates = [r for r in rects if (r.x0 >= x_min and r.x0 <= x_max)]
             if not candidates:
                 candidates = rects  # fallback: use any match if X-filter removes all
-
+ 
             # Choose the "best" match:
             # - typically, the title "GLOSAS" is a standalone heading, so pick the leftmost/topmost candidate.
             # - prioritize smallest x0 (left margin), then smallest y0 (higher on page).
             best = sorted(candidates, key=lambda r: (r.x0, r.y0))[0]
-
+ 
             # PyMuPDF y0 is top of the rectangle in top-left origin space
             glosas_y_pdf = float(page_height) - float(best.y0)
-
+ 
         # If the glosas cut line is within our base bbox vertical span, crop the bottom upward.
         # Camelot expects y1 < y2; increasing y1 makes the bbox shorter (removes lower content).
         if y1 < glosas_y_pdf < y2:
             new_y1 = max(y1, glosas_y_pdf + float(pad_points))
             new_area = self._format_camelot_area(x1, new_y1, x2, y2)
             return new_area, glosas_y_pdf
-
+ 
         # If the match is outside the bbox span, leave unchanged (likely bbox already excludes it)
         return base_table_area_str, glosas_y_pdf
-
-
+ 
+ 
     def _crop_table_area_above_glosas(
         self,
         pdf_path: str,
@@ -839,55 +782,122 @@ class TableHelper:
         """
         Find the 'GLOSAS' heading on a page (PyMuPDF), convert coordinates to PDF/Camelot space,
         and crop a Camelot table_areas bbox so it excludes the Glosas section.
-
+ 
         Args:
             pdf_path: Path to PDF.
             camelot_page: 1-based page number (Camelot convention).
             base_table_area_str: Camelot bbox string "x1,y1,x2,y2" (PDF coords, origin bottom-left).
             page_height: Page height in points.
             pad_points: Extra padding above the GLOSAS heading to avoid clipping the last table row.
-
+ 
         Returns:
             (new_table_area_str, glosas_cut_y_pdf)
             - new_table_area_str: Cropped bbox string. Unchanged if GLOSAS not found.
             - glosas_cut_y_pdf: Y coordinate (PDF/Camelot space) of the top of the GLOSAS heading, or None.
         """
         x1, y1, x2, y2 = (float(v.strip()) for v in base_table_area_str.split(","))
-
+ 
         page_index = camelot_page - 1
         if page_index < 0:
             raise ValueError("camelot_page must be >= 1")
-
+ 
         with pymupdf.open(pdf_path) as doc:
             page = doc.load_page(page_index)
-
+ 
             # Try a couple common variants
             rects = page.search_for("GLOSAS :")
             if not rects:
                 rects = page.search_for("GLOSAS:")
-
+ 
             if not rects:
                 return base_table_area_str, None
-
+ 
             # If multiple matches, pick the leftmost/topmost
             rect = sorted(rects, key=lambda r: (r.x0, r.y0))[0]
-
+ 
             # Convert PyMuPDF y0 (top-origin) to PDF y (bottom-origin)
             glosas_cut_y_pdf = float(page_height) - float(rect.y0)
-
+ 
         # Crop only if the cut falls inside the bbox vertical span
         if y1 < glosas_cut_y_pdf < y2:
             new_y1 = max(y1, glosas_cut_y_pdf + pad_points)
             new_area = f"{x1},{new_y1},{x2},{y2}"
             return new_area, glosas_cut_y_pdf
-
+ 
         return base_table_area_str, None
+ 
 
+    # Original
+    # @staticmethod
+    # def _score_template_a_alignment(df: pd.DataFrame) -> int:
+    #     """
+    #     Heuristic score for whether a 6-col Template A extraction is aligned correctly.
+    #     Higher is better.
+    #     """
+    #     if df is None or df.empty or df.shape[1] != 6:
+    #         return -10_000
+ 
+    #     tmp = df.copy()
+    #     tmp.columns = [
+    #         "sub_titulo",
+    #         "item_asig",
+    #         "denominaciones",
+    #         "glosa_no",
+    #         "moneda_nacional_miles_de_$CLP",
+    #         "moneda_ext_convertida_miles_USD",
+    #     ]
+ 
+    #     denom = tmp["denominaciones"].fillna("").astype(str).str.strip()
+    #     item  = tmp["item_asig"].fillna("").astype(str).str.strip()
+    #     sub   = tmp["sub_titulo"].fillna("").astype(str).str.strip()
+    #     glosa = tmp["glosa_no"].fillna("").astype(str).str.strip()
+    #     clp   = tmp["moneda_nacional_miles_de_$CLP"].fillna("").astype(str).str.strip()
+    #     usd   = tmp["moneda_ext_convertida_miles_USD"].fillna("").astype(str).str.strip()
+ 
+    #     denom_nonempty = (denom != "").sum()
+ 
+    #     # Sub-titulo should have many 2-digit codes (or blanks), not words
+    #     sub_numeric_or_empty = (sub.eq("") | sub.str.fullmatch(r"\d{2}", na=False)).sum()
+    #     sub_nonempty = (sub != "").sum()
+ 
+    #     # Item can have 1–3 digits or be empty (014, 01, 243, etc.)
+    #     item_numeric_or_empty = (item.eq("") | item.str.fullmatch(r"\d{1,3}", na=False)).sum()
+    #     item_has_words = item.str.contains(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", regex=True).sum()
+ 
+    #     # Glosa should contain some 2-digit codes on many pages
+    #     glosa_nonempty = (glosa != "").sum()
+    #     glosa_2digit = glosa.str.fullmatch(r"\d{2}", na=False).sum()
+ 
+    #     # Detect classic shifts: glosa codes leaking into CLP
+    #     clp_2digit_like = clp.str.fullmatch(r"\d{2}", na=False).sum()
+ 
+    #     # Detect money swapping: if USD is too "full" compared to CLP (rough signal)
+    #     clp_nonempty = (clp != "").sum()
+    #     usd_nonempty = (usd != "").sum()
+ 
+    #     bad_headings = item.str.contains(r"\b(?:INGRESOS|GASTOS|APORTE|TRANSFERENCIAS)\b", regex=True).sum()
+ 
+ 
+    #     score = 0
+    #     score += 2 * denom_nonempty
+    #     score += 2 * item_numeric_or_empty
+    #     score += 1 * sub_numeric_or_empty
+    #     score -= 3 * item_has_words
+    #     score -= 10 * bad_headings
+ 
+    #     # Strong alignment incentives / penalties
+    #     score += 4 * glosa_2digit
+    #     score -= 30 * (1 if sub_nonempty < 2 else 0)          # subtitle missing => big penalty
+    #     score -= 30 * (1 if glosa_nonempty == 0 else 0)       # glosa missing => big penalty
+    #     score -= 20 * clp_2digit_like                         # glosa leaking into CLP
+    #     score -= 10 * (1 if (usd_nonempty > clp_nonempty and clp_nonempty < 3) else 0)
+ 
+    #     return int(score)
+    #DEBUG ADD 10FEB
     @staticmethod
     def _score_template_a_alignment(df: pd.DataFrame) -> int:
         """
-        Heuristic score for whether a 6-col Template A extraction is aligned correctly.
-        Higher is better.
+        Enhanced validation for alignment with penalties for likely misassignments.
         """
         if df is None or df.empty or df.shape[1] != 6:
             return -10_000
@@ -905,52 +915,63 @@ class TableHelper:
         denom = tmp["denominaciones"].fillna("").astype(str).str.strip()
         item  = tmp["item_asig"].fillna("").astype(str).str.strip()
         sub   = tmp["sub_titulo"].fillna("").astype(str).str.strip()
-        glosa = tmp["glosa_no"].fillna("").astype(str).str.strip()
-        clp   = tmp["moneda_nacional_miles_de_$CLP"].fillna("").astype(str).str.strip()
-        usd   = tmp["moneda_ext_convertida_miles_USD"].fillna("").astype(str).str.strip()
 
-        denom_nonempty = (denom != "").sum()
+        # Calculate penalties for unusual assignments
+        denom_too_empty = (denom == "").sum()
+        item_is_wordy = item.str.match(r".*[A-Za-zÁÉÍÓÚÑáéíóúñ]", na=False).sum()
 
-        # Sub-titulo should have many 2-digit codes (or blanks), not words
-        sub_numeric_or_empty = (sub.eq("") | sub.str.fullmatch(r"\d{2}", na=False)).sum()
-        sub_nonempty = (sub != "").sum()
-
-        # Item can have 1–3 digits or be empty (014, 01, 243, etc.)
-        item_numeric_or_empty = (item.eq("") | item.str.fullmatch(r"\d{1,3}", na=False)).sum()
-        item_has_words = item.str.contains(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", regex=True).sum()
-
-        # Glosa should contain some 2-digit codes on many pages
-        glosa_nonempty = (glosa != "").sum()
-        glosa_2digit = glosa.str.fullmatch(r"\d{2}", na=False).sum()
-
-        # Detect classic shifts: glosa codes leaking into CLP
-        clp_2digit_like = clp.str.fullmatch(r"\d{2}", na=False).sum()
-
-        # Detect money swapping: if USD is too "full" compared to CLP (rough signal)
-        clp_nonempty = (clp != "").sum()
-        usd_nonempty = (usd != "").sum()
-
-        bad_headings = item.str.contains(r"\b(?:INGRESOS|GASTOS|APORTE|TRANSFERENCIAS)\b", regex=True).sum()
-
+        # Check if `item_asig` is appropriately numeric
+        item_non_numeric = ~item.str.fullmatch(r"[\d]{1,3}", na=False)
 
         score = 0
-        score += 2 * denom_nonempty
-        score += 2 * item_numeric_or_empty
-        score += 1 * sub_numeric_or_empty
-        score -= 3 * item_has_words
-        score -= 10 * bad_headings
 
-        # Strong alignment incentives / penalties
-        score += 4 * glosa_2digit
-        score -= 30 * (1 if sub_nonempty < 2 else 0)          # subtitle missing => big penalty
-        score -= 30 * (1 if glosa_nonempty == 0 else 0)       # glosa missing => big penalty
-        score -= 20 * clp_2digit_like                         # glosa leaking into CLP
-        score -= 10 * (1 if (usd_nonempty > clp_nonempty and clp_nonempty < 3) else 0)
+        # Reward strongly aligned cases
+        score += 2 * (item.str.fullmatch(r"[\d]{1,3}", na=False).sum())  # Numeric item_asig
+        score += 2 * (denom != "").sum()  # Non-empty denominaciones
 
-        return int(score)
+        # Penalize misaligned cases
+        score -= 3 * denom_too_empty
+        score -= 5 * item_non_numeric.sum()
+        score -= 4 * item_is_wordy
 
+        return int(score) # END OF DEBUG ADD 10FEB
+    
+    #DEBUG ADD 10FEB
+    @staticmethod
+    def _post_process_extracted_table(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Post-process the extracted table to resolve issues where text values
+        are wrongly placed in `item_asig` and split content appropriately.
+        """
+        tmp = df.copy()
+        tmp.columns = [
+            "sub_titulo",
+            "item_asig",
+            "denominaciones",
+            "glosa_no",
+            "moneda_nacional_miles_de_$CLP",
+            "moneda_ext_convertida_miles_USD",
+        ]
 
-    # ---------- CORE FUNCTIONS SECTION  ----------
+        # Define a regex pattern to match numeric keys followed by text
+        numeric_with_text_pattern = r"^(\d{1,3})\s+(.+)$"
+        
+        # Split text patterns in `item_asig` where applicable
+        misaligned = tmp["item_asig"].str.match(numeric_with_text_pattern, na=False)
+        split_values = tmp.loc[misaligned, "item_asig"].str.extract(numeric_with_text_pattern)
+        
+        # Assign numeric part back to item_asig
+        tmp.loc[misaligned, "item_asig"] = split_values[0]  # Group 1: Numeric portion
+        tmp.loc[misaligned, "denominaciones"] = split_values[1]  # Group 2: Associated text
+        
+        # Any non-numeric `item_asig` is moved to `denominaciones`
+        item_is_wordy = tmp["item_asig"].str.contains(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", na=False)
+        tmp.loc[item_is_wordy, "denominaciones"] = tmp.loc[item_is_wordy, "item_asig"]
+        tmp.loc[item_is_wordy, "item_asig"] = None
+
+        return tmp
+
+    # ---------- REPORT HEADER FUNCTIONS SECTION  ----------
     # Function that only extracts the main report header of each page 
     def extract_main_report_header(
         self,
@@ -1048,6 +1069,7 @@ class TableHelper:
         captured_merged = self._merge_continuations(captured)
         service_component, sub_component = self._split_repeated_wrapped_header_blocks(captured_merged)
 
+
         if debug:
             print(f"[DEBUG] ministry_idx = {ministry_idx}, ministry= {ministry!r}")
             print(f"[DEBUG] start_after_ministry_idx={start_after_ministry_idx}")
@@ -1070,7 +1092,7 @@ class TableHelper:
     def extract_main_report_header_return_list(
             self,
             pdf_path: str,
-            page_nums: List[int],
+            page_numbers: List[int],
             *,
             header_main_area: str,
             flavor: str = 'stream',
@@ -1087,7 +1109,7 @@ class TableHelper:
         # results will hold the main header and side header information
         results = []
 
-        for page in page_nums:
+        for page in page_numbers:
             out = self.extract_main_report_header(
                 pdf_path=pdf_path,
                 page_num=page,
@@ -1248,7 +1270,7 @@ class TableHelper:
         # Run both batch extractors by calling their specific functions with applicable param arguments ie- header search area and side header search area
         main_list = self.extract_main_report_header_return_list(
             pdf_path=pdf_path,
-            page_nums=page_nums,
+            page_numbers=page_nums,
             header_main_area=header_main_area,
             flavor=flavor,
             strip_text=strip_text,
@@ -1314,7 +1336,6 @@ class TableHelper:
     
         return merged
     
-
     # ------------- SERVICE COMPONENT TABLE EXTRACTION SECTION -------------
     def extract_service_component_table_template_a(
         self,
@@ -1326,7 +1347,7 @@ class TableHelper:
         ) -> pd.DataFrame:
         """
         Extract the service component table from a single PDF page using Template A config.
-
+ 
         Notes:
             - This function currently reads the YAML key
               `service_component_table_areas.template_a_with_usd` (expected_cols=6).
@@ -1335,7 +1356,7 @@ class TableHelper:
             - The YAML `table_area_preview` must be measured in macOS Preview as:
               "left,top,width,height" in PDF points. This is converted to Camelot's
               "x1,y1,x2,y2" coordinate system.
-
+ 
         Args:
             pdf_path: Path to the PDF.
             page: Page number to extract (int or str).
@@ -1345,20 +1366,20 @@ class TableHelper:
                   - table_area_preview
                   - expected_cols
             flavor: Camelot flavor (default "lattice").
-
+ 
         Returns:
             DataFrame of the extracted table.
-
+ 
         Raises:
             KeyError: Missing required config keys.
             RuntimeError: No tables found in the configured area.
             ValueError: Extracted table has unexpected column count.
         """
         tmpl = config["service_component_table_areas"]["template_a_with_usd"]
-
+ 
         page_height = tmpl["page_height"]
         expected_cols = int(tmpl["expected_cols"])
-
+ 
         left, top, width, height = self._parse_csv_floats(
             tmpl["table_area_preview"], expected_n=4
         )
@@ -1369,7 +1390,7 @@ class TableHelper:
             width=width,
             height=height,
         )
-
+ 
         # --- Crop table area above any GLOSAS section (financial table only) ---
         area_str, glosas_cut_y = self._crop_table_area_above_glosas(
             pdf_path=pdf_path,
@@ -1379,25 +1400,25 @@ class TableHelper:
         )
         if glosas_cut_y is not None:
             logger.debug(f"GLOSAS detected on page {page} at y={glosas_cut_y} (cropping financial table only)")
-
+ 
         # IMPORTANT: For Template A financial tables (6 Columns), ALWAYS use FULL column cuts.
         columns_full = tmpl.get("columns_preview_full")
-
+ 
         def _best_table(tables):
             return max(tables, key=lambda t: int(t.shape[0]) * int(t.shape[1]))
-
+ 
         def _df_from_tables(tables_):
             if tables_ is None:
                 return pd.DataFrame()
-
+ 
             # get camelots .n attribute (number of tables)
             n = getattr(tables_, "n", None)
             if n is not None:
                 return pd.DataFrame() if n == 0 else _best_table(tables_).df
-
+ 
             # fallback if it's a list-like
             return pd.DataFrame() if len(tables_) == 0 else _best_table(tables_).df
-
+ 
         def _read_stream(area_str: str, columns_preview: str | None):
             stream_kwargs = dict(
                 filepath=pdf_path,
@@ -1414,25 +1435,25 @@ class TableHelper:
                     )
                 ]
                 stream_kwargs["columns"] = [",".join(cols)]
-            return camelot.read_pdf(**stream_kwargs)
-
+            return camelot.read_pdf(**stream_kwargs) # type: ignore
+ 
         def _shift_columns_preview(columns_preview: str, delta: float) -> str:
             """
             Shift column divider x-positions by delta, but keep the FIRST divider fixed.
-
+ 
             Why: The left edge / Sub-Título cut is very stable across pages, but the
             Ítem Asig | Denominaciones boundary can drift and sometimes needs adjustment.
             """
             xs = list(self._parse_csv_floats(columns_preview, expected_n=expected_cols - 1))
-
+ 
             # Defensive: Template A expects 5 dividers when expected_cols=6
             if len(xs) != expected_cols - 1:
                 return columns_preview
-
+ 
             # Freeze ONLY the first cut (Sub-Título | Ítem Asig).
             shifted = [xs[0]] + [float(x) + float(delta) for x in xs[1:]]
             return ",".join(str(x) for x in shifted)
-
+ 
         # ---- Extraction strategy ----
         # Keep original behavior for "normal" pages (lattice first),
         # but ALWAYS score/choose final output from stream with FULL cuts (and small deltas if needed).
@@ -1443,7 +1464,7 @@ class TableHelper:
                 flavor="lattice",
                 table_areas=[area_str],
             )
-
+ 
             # Validate lattice result; if it doesn't look right, use stream.
             if tables.n == 0:
                 tables = _read_stream(area_str, columns_full)
@@ -1454,24 +1475,56 @@ class TableHelper:
         else:
             # Mixed page (financial table + glosas underneath): stream only, using FULL cuts.
             tables = _read_stream(area_str, columns_full)
-
+ 
         if tables.n == 0:
             raise RuntimeError(
                 f"No tables found by Camelot on page={page} using area={area_str}."
             )
-
+ 
         # --- Final alignment rescue (only if baseline is bad) ---
         # Baseline (delta=0) should preserve the other pages.
         df0 = _df_from_tables(_read_stream(area_str, columns_full))
         score0 = self._score_template_a_alignment(df0)
 
+        # Original COde 10 Feb
+        # def _needs_delta_rescue_template_a(df_: pd.DataFrame) -> bool:
+        #     """
+        #     Only trigger delta-search for the specific 'cascade shift' failure mode:
+        #     - Glosa column empty but glosa-like 2-digit codes appear in CLP
+        #     - CLP appears to have shifted into USD (USD "too full" while CLP sparse)
+        #     This avoids destabilizing otherwise-good pages (e.g., 559/565).
+        #     """
+        #     if df_ is None or df_.empty or df_.shape[1] != expected_cols:
+        #         return True
+ 
+        #     tmp = df_.copy()
+        #     tmp.columns = [
+        #         "sub_titulo",
+        #         "item_asig",
+        #         "denominaciones",
+        #         "glosa_no",
+        #         "moneda_nacional_miles_de_$CLP",
+        #         "moneda_ext_convertida_miles_USD",
+        #     ]
+ 
+        #     glosa = tmp["glosa_no"].fillna("").astype(str).str.strip()
+        #     clp   = tmp["moneda_nacional_miles_de_$CLP"].fillna("").astype(str).str.strip()
+        #     usd   = tmp["moneda_ext_convertida_miles_USD"].fillna("").astype(str).str.strip()
+ 
+        #     glosa_nonempty = (glosa != "").sum()
+        #     clp_2digit_like = clp.str.fullmatch(r"\d{2}", na=False).sum()
+ 
+        #     clp_nonempty = (clp != "").sum()
+        #     usd_nonempty = (usd != "").sum()
+ 
+        #     # Trigger conditions: the cascade symptoms you reported on the last page
+        #     glosa_shifted_into_clp = (glosa_nonempty == 0 and clp_2digit_like >= 2)
+        #     clp_shifted_into_usd = (usd_nonempty > clp_nonempty and clp_nonempty < 3)
+ 
+        #     return glosa_shifted_into_clp or clp_shifted_into_usd
+
+        # DEBUG ADD 10FEB
         def _needs_delta_rescue_template_a(df_: pd.DataFrame) -> bool:
-            """
-            Only trigger delta-search for the specific 'cascade shift' failure mode:
-            - Glosa column empty but glosa-like 2-digit codes appear in CLP
-            - CLP appears to have shifted into USD (USD "too full" while CLP sparse)
-            This avoids destabilizing otherwise-good pages (e.g., 559/565).
-            """
             if df_ is None or df_.empty or df_.shape[1] != expected_cols:
                 return True
 
@@ -1485,37 +1538,50 @@ class TableHelper:
                 "moneda_ext_convertida_miles_USD",
             ]
 
+            # Validate expected content in columns
+            sub_titulo = tmp["sub_titulo"].fillna("").astype(str).str.strip()
+            item_asig = tmp["item_asig"].fillna("").astype(str).str.strip()
+            denominaciones = tmp["denominaciones"].fillna("").astype(str).str.strip()
             glosa = tmp["glosa_no"].fillna("").astype(str).str.strip()
-            clp   = tmp["moneda_nacional_miles_de_$CLP"].fillna("").astype(str).str.strip()
-            usd   = tmp["moneda_ext_convertida_miles_USD"].fillna("").astype(str).str.strip()
 
-            glosa_nonempty = (glosa != "").sum()
-            clp_2digit_like = clp.str.fullmatch(r"\d{2}", na=False).sum()
+            # Check for suspicious shifts
+            sub_empty_or_non_numeric = (sub_titulo.eq("") | sub_titulo.str.fullmatch(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]+", na=False)).sum()
+            item_has_keywords = item_asig.str.contains(r"\b(INGRESOS|TRANSFERENCIAS|APORTE)\b", regex=True).sum()
 
-            clp_nonempty = (clp != "").sum()
-            usd_nonempty = (usd != "").sum()
+            # Glosa should have valid numeric-like codes
+            valid_glosa = glosa.str.fullmatch(r"^\d{1,2}(,\d{1,2})?$", na=False).sum()
 
-            # Trigger conditions: the cascade symptoms you reported on the last page
-            glosa_shifted_into_clp = (glosa_nonempty == 0 and clp_2digit_like >= 2)
-            clp_shifted_into_usd = (usd_nonempty > clp_nonempty and clp_nonempty < 3)
+            # Penalize cascade symptoms of misaligned columns
+            if sub_empty_or_non_numeric > 2 or item_has_keywords > 1:
+                return True
+            if valid_glosa == 0 and denominaciones.str.contains(r"[A-Za-z]").sum() > 2:
+                return True
 
-            return glosa_shifted_into_clp or clp_shifted_into_usd
-
-
+            return False # END OF DBUG ADD 10 FEB
+ 
+ 
         # Baseline should preserve good pages (559/565). Only run delta rescue when the *cascade* is detected.
         if not _needs_delta_rescue_template_a(df0):
             df = df0
         else:
             candidates: list[tuple[float, pd.DataFrame, int]] = [(0.0, df0, score0)]
 
-            for delta in (-6.0, 6.0, -12.0, 12.0):
+            # Original
+            # for delta in (-6.0, 6.0, -12.0, 12.0):
+            #     cols = _shift_columns_preview(columns_full, delta)
+            #     df_cand = _df_from_tables(_read_stream(area_str, cols))
+            #     score = self._score_template_a_alignment(df_cand)
+            #     candidates.append((delta, df_cand, score))
+
+            # DEBUG ADD 10FEB
+            for delta in (-15.0, -10.0, -6.0, 0, 6.0, 10.0, 15.0):
                 cols = _shift_columns_preview(columns_full, delta)
                 df_cand = _df_from_tables(_read_stream(area_str, cols))
                 score = self._score_template_a_alignment(df_cand)
-                candidates.append((delta, df_cand, score))
-
+                candidates.append((delta, df_cand, score)) # END OF DEBUG ADD 10FEB
+ 
             best_delta, df_best, best_score = max(candidates, key=lambda t: t[2])
-
+ 
             # Safety gate: only accept a non-zero delta if it's a *meaningful* improvement.
             # Prevents small score fluctuations from breaking Sub/Item on otherwise-good pages.
             min_gain = 25
@@ -1532,15 +1598,15 @@ class TableHelper:
                         f"selected delta={best_delta} score={best_score} baseline={score0}"
                     )
                 df = df_best
-
-
+ 
+ 
         # Final validation
         if df.shape[1] != expected_cols:
             raise ValueError(
                 f"Template A extraction failed validation: expected {expected_cols} columns, "
                 f"got {df.shape[1]} (page={page}, area={area_str})."
             )
-
+ 
         # Assign canonical column names
         df.columns = [
             "sub_titulo",
@@ -1550,11 +1616,15 @@ class TableHelper:
             "moneda_nacional_miles_de_$CLP",
             "moneda_ext_convertida_miles_USD",
         ]
-
+ 
         # Clean / normalize text for readability
         df = self._clean_service_component_table(df)
 
+        # Debug Add 10FEB
+        df = self._post_process_extracted_table(df)
+ 
         return df
+ 
     
     def extract_service_component_tables_template_a_from_list(
         self,
@@ -1564,43 +1634,39 @@ class TableHelper:
     ) -> pd.DataFrame:
         """
         Extract Template A (6-column) service component tables for multiple pages and combine results.
-
+ 
         This is a thin wrapper around `extract_service_component_table_template_a`, intended for
         batch extraction once single-page behavior is validated.
-
+ 
         Args:
             pdf_path: Path to the PDF file.
             pages: List of Camelot 1-based page numbers to extract.
             config: Loaded YAML config dict containing `service_component_table_areas`.
-
+ 
         Returns:
             Combined DataFrame with two extra columns:
             - source_page: int (Camelot 1-based page)
             - has_glosas: bool (True if 'GLOSAS' was detected/cropped on that page)
         """
         dfs: list[pd.DataFrame] = []
-
+ 
         for p in pages:
             df = self.extract_service_component_table_template_a(
                 pdf_path=pdf_path,
                 page=p,
                 config=config,
             )
-
+ 
             # Add provenance
             df = df.copy()
             df["source_page"] = int(p)
-
-            # If you already log/use glosas_cut_y internally, you can optionally expose it.
-            # For now, infer from content: presence of the glosa multi-value pattern or USD-only lines is not reliable.
-            # Better approach: return has_glosas from the extractor later.
+ 
             df["has_glosas"] = False  # placeholder
-
+ 
             dfs.append(df)
-
+ 
         if not dfs:
             return pd.DataFrame()
-
+ 
         return pd.concat(dfs, ignore_index=True)
-
-# ---------- END OF SCRIPT ----------
+ # ---------- END OF SCRIPT ----------
