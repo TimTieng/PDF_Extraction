@@ -969,6 +969,40 @@ class TableHelper:
         tmp.loc[item_is_wordy, "denominaciones"] = tmp.loc[item_is_wordy, "item_asig"]
         tmp.loc[item_is_wordy, "item_asig"] = None
 
+        # ===============================
+        # PATCH 2: Repair "slipped item_asig into sub_titulo"
+        # ===============================
+        sub = tmp["sub_titulo"].fillna("").astype(str).str.strip()
+        item = tmp["item_asig"].fillna("").astype(str).str.strip()
+        denom = tmp["denominaciones"].fillna("").astype(str).str.strip()
+
+        # Identify "real" Sub-Título headings:
+        # - sub is exactly 2 digits
+        # - item is empty
+        # - denominaciones looks like an uppercase heading
+        is_heading = (
+            sub.str.fullmatch(r"\d{2}", na=False)
+            & item.eq("")
+            & denom.str.fullmatch(r"[A-ZÁÉÍÓÚÑ\s\-\.\,]{4,}", na=False)
+        )
+        valid_sub = set(sub[is_heading])
+
+        # If item is empty but sub contains a 1–3 digit code that is NOT a heading,
+        # it's almost certainly an item_asig that slipped into sub_titulo.
+        mask_slip = (
+            item.eq("")
+            & sub.str.fullmatch(r"\d{1,3}", na=False)
+            & (~sub.isin(valid_sub))
+            & denom.ne("")
+        )
+
+        tmp.loc[mask_slip, "item_asig"] = sub[mask_slip]
+        tmp.loc[mask_slip, "sub_titulo"] = None
+        # ===============================
+        # END PATCH 2
+        # ===============================
+
+
         return tmp
 
     # ---------- REPORT HEADER FUNCTIONS SECTION  ----------
@@ -1453,6 +1487,16 @@ class TableHelper:
             # Freeze ONLY the first cut (Sub-Título | Ítem Asig).
             shifted = [xs[0]] + [float(x) + float(delta) for x in xs[1:]]
             return ",".join(str(x) for x in shifted)
+        
+        # DEBUG ADD 10FEB 
+        def _shift_first_divider(columns_preview: str, delta_first: float) -> str:
+            xs = list(self._parse_csv_floats(columns_preview, expected_n=expected_cols - 1))
+            if len(xs) != expected_cols - 1:
+                return columns_preview
+            # Move ONLY the first divider; keep the rest unchanged
+            xs[0] = float(xs[0]) + float(delta_first)
+            return ",".join(str(x) for x in xs) # END OF DEBUG ADD 10 FEB
+
  
         # ---- Extraction strategy ----
         # Keep original behavior for "normal" pages (lattice first),
@@ -1546,7 +1590,9 @@ class TableHelper:
 
             # Check for suspicious shifts
             sub_empty_or_non_numeric = (sub_titulo.eq("") | sub_titulo.str.fullmatch(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]+", na=False)).sum()
-            item_has_keywords = item_asig.str.contains(r"\b(INGRESOS|TRANSFERENCIAS|APORTE)\b", regex=True).sum()
+            # item_has_keywords = item_asig.str.contains(r"\b(INGRESOS|TRANSFERENCIAS|APORTE)\b", regex=True).sum()
+            item_has_keywords = item_asig.str.contains(r"\b(?:INGRESOS|TRANSFERENCIAS|APORTE)\b", regex=True).sum()
+
 
             # Glosa should have valid numeric-like codes
             valid_glosa = glosa.str.fullmatch(r"^\d{1,2}(,\d{1,2})?$", na=False).sum()
@@ -1558,6 +1604,24 @@ class TableHelper:
                 return True
 
             return False # END OF DBUG ADD 10 FEB
+        
+        # DEBUG ADD 10FEB
+        def _needs_first_divider_rescue(df_: pd.DataFrame) -> bool:
+            if df_ is None or df_.empty or df_.shape[1] != expected_cols:
+                return False
+
+            tmp = df_.copy()
+            tmp.columns = ["sub_titulo","item_asig","denominaciones","glosa_no",
+                        "moneda_nacional_miles_de_$CLP","moneda_ext_convertida_miles_USD"]
+
+            sub = tmp["sub_titulo"].fillna("").astype(str).str.strip()
+            item = tmp["item_asig"].fillna("").astype(str).str.strip()
+            denom = tmp["denominaciones"].fillna("").astype(str).str.strip()
+
+            # Signature: many rows where item is empty but sub is numeric (1–3 digits) while denom has text
+            slipped = (item.eq("") & sub.str.fullmatch(r"\d{1,3}", na=False) & denom.ne("")).sum()
+            return slipped >= 3 # END OF DEBUG ADD 10 FEB
+
  
  
         # Baseline should preserve good pages (559/565). Only run delta rescue when the *cascade* is detected.
@@ -1579,6 +1643,16 @@ class TableHelper:
                 df_cand = _df_from_tables(_read_stream(area_str, cols))
                 score = self._score_template_a_alignment(df_cand)
                 candidates.append((delta, df_cand, score)) # END OF DEBUG ADD 10FEB
+
+            # Debug add 10feb
+            if _needs_first_divider_rescue(df0):
+                # Usually you want to move the first divider LEFT a bit to stop item codes falling into sub
+                for d1 in (-12.0, -10.0, -8.0, -6.0, -4.0, 0.0, 4.0):
+                    cols = _shift_first_divider(columns_full, d1)
+                    df_cand = _df_from_tables(_read_stream(area_str, cols))
+                    score = self._score_template_a_alignment(df_cand)
+                    candidates.append((1000.0 + d1, df_cand, score))  # unique delta key, doesn’t matter
+
  
             best_delta, df_best, best_score = max(candidates, key=lambda t: t[2])
  
