@@ -936,6 +936,40 @@ class TableHelper:
         # END PATCH 2
         # ===============================
 
+        # ===============================
+        # PATCH 4: If a 2-digit code appears in sub_titulo on a child row, move it to item_asig
+        #
+        # NOTE:
+        # Some PDFs print child item codes (e.g., "07") in the Sub-Título column
+        # when they visually belong to Ítem Asig., based on capitalization of
+        # Denominaciones. We correct this here to match the PDF semantics exactly.
+        # PDF behavior: Under a sub_titulo header (e.g., 12), detail rows should have
+        # sub_titulo blank and item_asig populated (e.g., 07).
+        #
+        # We only move when:
+        # - item_asig is empty
+        # - sub_titulo is a 2-digit code
+        # - denominaciones is NOT an all-caps heading (so it's a detail row)
+        # ===============================
+        sub = tmp["sub_titulo"].fillna("").astype(str).str.strip()
+        item = tmp["item_asig"].fillna("").astype(str).str.strip()
+        denom = tmp["denominaciones"].fillna("").astype(str).str.strip()
+
+        is_allcaps_heading = denom.str.fullmatch(r"[A-ZÁÉÍÓÚÑ\s\-\.\,]{4,}", na=False)
+
+        mask_orphan_sub = (
+            item.eq("")
+            & sub.str.fullmatch(r"\d{2}", na=False)     # looks like a sub code
+            & (~is_allcaps_heading)                     # but denom looks like detail text
+            & denom.ne("")
+        )
+
+        tmp.loc[mask_orphan_sub, "item_asig"] = sub[mask_orphan_sub]
+        tmp.loc[mask_orphan_sub, "sub_titulo"] = None
+        # ===============================
+        # END PATCH 4
+        # ===============================
+
 
         return tmp
 
@@ -1583,6 +1617,24 @@ class TableHelper:
 
         # Debug Add 10FEB
         df = self._post_process_extracted_table(df)
+
+        # DEBUG ADD 10FEB
+        bad_sub = (~df["sub_titulo"].isna()) & (~df["sub_titulo"].astype(str).str.fullmatch(r"\d{2}", na=False))
+        bad_item = (~df["item_asig"].isna()) & (~df["item_asig"].astype(str).str.fullmatch(r"\d{1,3}", na=False))
+
+        print(
+            f"[VALIDATE TemplateA page={page}] rows={len(df)} "
+            f"bad_sub={int(bad_sub.sum())} bad_item={int(bad_item.sum())}"
+        )
+
+        if bad_sub.any():
+            print("[BAD sub_titulo examples]")
+            print(df.loc[bad_sub, ["sub_titulo", "item_asig", "denominaciones"]].head(10))
+
+        if bad_item.any():
+            print("[BAD item_asig examples]")
+            print(df.loc[bad_item, ["sub_titulo", "item_asig", "denominaciones"]].head(10)) # END OF DEBUG ADD 10FEB
+
  
         return df
  
