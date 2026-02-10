@@ -827,72 +827,6 @@ class TableHelper:
         return base_table_area_str, None
  
 
-    # Original
-    # @staticmethod
-    # def _score_template_a_alignment(df: pd.DataFrame) -> int:
-    #     """
-    #     Heuristic score for whether a 6-col Template A extraction is aligned correctly.
-    #     Higher is better.
-    #     """
-    #     if df is None or df.empty or df.shape[1] != 6:
-    #         return -10_000
- 
-    #     tmp = df.copy()
-    #     tmp.columns = [
-    #         "sub_titulo",
-    #         "item_asig",
-    #         "denominaciones",
-    #         "glosa_no",
-    #         "moneda_nacional_miles_de_$CLP",
-    #         "moneda_ext_convertida_miles_USD",
-    #     ]
- 
-    #     denom = tmp["denominaciones"].fillna("").astype(str).str.strip()
-    #     item  = tmp["item_asig"].fillna("").astype(str).str.strip()
-    #     sub   = tmp["sub_titulo"].fillna("").astype(str).str.strip()
-    #     glosa = tmp["glosa_no"].fillna("").astype(str).str.strip()
-    #     clp   = tmp["moneda_nacional_miles_de_$CLP"].fillna("").astype(str).str.strip()
-    #     usd   = tmp["moneda_ext_convertida_miles_USD"].fillna("").astype(str).str.strip()
- 
-    #     denom_nonempty = (denom != "").sum()
- 
-    #     # Sub-titulo should have many 2-digit codes (or blanks), not words
-    #     sub_numeric_or_empty = (sub.eq("") | sub.str.fullmatch(r"\d{2}", na=False)).sum()
-    #     sub_nonempty = (sub != "").sum()
- 
-    #     # Item can have 1–3 digits or be empty (014, 01, 243, etc.)
-    #     item_numeric_or_empty = (item.eq("") | item.str.fullmatch(r"\d{1,3}", na=False)).sum()
-    #     item_has_words = item.str.contains(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", regex=True).sum()
- 
-    #     # Glosa should contain some 2-digit codes on many pages
-    #     glosa_nonempty = (glosa != "").sum()
-    #     glosa_2digit = glosa.str.fullmatch(r"\d{2}", na=False).sum()
- 
-    #     # Detect classic shifts: glosa codes leaking into CLP
-    #     clp_2digit_like = clp.str.fullmatch(r"\d{2}", na=False).sum()
- 
-    #     # Detect money swapping: if USD is too "full" compared to CLP (rough signal)
-    #     clp_nonempty = (clp != "").sum()
-    #     usd_nonempty = (usd != "").sum()
- 
-    #     bad_headings = item.str.contains(r"\b(?:INGRESOS|GASTOS|APORTE|TRANSFERENCIAS)\b", regex=True).sum()
- 
- 
-    #     score = 0
-    #     score += 2 * denom_nonempty
-    #     score += 2 * item_numeric_or_empty
-    #     score += 1 * sub_numeric_or_empty
-    #     score -= 3 * item_has_words
-    #     score -= 10 * bad_headings
- 
-    #     # Strong alignment incentives / penalties
-    #     score += 4 * glosa_2digit
-    #     score -= 30 * (1 if sub_nonempty < 2 else 0)          # subtitle missing => big penalty
-    #     score -= 30 * (1 if glosa_nonempty == 0 else 0)       # glosa missing => big penalty
-    #     score -= 20 * clp_2digit_like                         # glosa leaking into CLP
-    #     score -= 10 * (1 if (usd_nonempty > clp_nonempty and clp_nonempty < 3) else 0)
- 
-    #     return int(score)
     #DEBUG ADD 10FEB
     @staticmethod
     def _score_template_a_alignment(df: pd.DataFrame) -> int:
@@ -1530,43 +1464,6 @@ class TableHelper:
         df0 = _df_from_tables(_read_stream(area_str, columns_full))
         score0 = self._score_template_a_alignment(df0)
 
-        # Original COde 10 Feb
-        # def _needs_delta_rescue_template_a(df_: pd.DataFrame) -> bool:
-        #     """
-        #     Only trigger delta-search for the specific 'cascade shift' failure mode:
-        #     - Glosa column empty but glosa-like 2-digit codes appear in CLP
-        #     - CLP appears to have shifted into USD (USD "too full" while CLP sparse)
-        #     This avoids destabilizing otherwise-good pages (e.g., 559/565).
-        #     """
-        #     if df_ is None or df_.empty or df_.shape[1] != expected_cols:
-        #         return True
- 
-        #     tmp = df_.copy()
-        #     tmp.columns = [
-        #         "sub_titulo",
-        #         "item_asig",
-        #         "denominaciones",
-        #         "glosa_no",
-        #         "moneda_nacional_miles_de_$CLP",
-        #         "moneda_ext_convertida_miles_USD",
-        #     ]
- 
-        #     glosa = tmp["glosa_no"].fillna("").astype(str).str.strip()
-        #     clp   = tmp["moneda_nacional_miles_de_$CLP"].fillna("").astype(str).str.strip()
-        #     usd   = tmp["moneda_ext_convertida_miles_USD"].fillna("").astype(str).str.strip()
- 
-        #     glosa_nonempty = (glosa != "").sum()
-        #     clp_2digit_like = clp.str.fullmatch(r"\d{2}", na=False).sum()
- 
-        #     clp_nonempty = (clp != "").sum()
-        #     usd_nonempty = (usd != "").sum()
- 
-        #     # Trigger conditions: the cascade symptoms you reported on the last page
-        #     glosa_shifted_into_clp = (glosa_nonempty == 0 and clp_2digit_like >= 2)
-        #     clp_shifted_into_usd = (usd_nonempty > clp_nonempty and clp_nonempty < 3)
- 
-        #     return glosa_shifted_into_clp or clp_shifted_into_usd
-
         # DEBUG ADD 10FEB
         def _needs_delta_rescue_template_a(df_: pd.DataFrame) -> bool:
             if df_ is None or df_.empty or df_.shape[1] != expected_cols:
@@ -1621,21 +1518,12 @@ class TableHelper:
             # Signature: many rows where item is empty but sub is numeric (1–3 digits) while denom has text
             slipped = (item.eq("") & sub.str.fullmatch(r"\d{1,3}", na=False) & denom.ne("")).sum()
             return slipped >= 3 # END OF DEBUG ADD 10 FEB
-
- 
  
         # Baseline should preserve good pages (559/565). Only run delta rescue when the *cascade* is detected.
         if not _needs_delta_rescue_template_a(df0):
             df = df0
         else:
             candidates: list[tuple[float, pd.DataFrame, int]] = [(0.0, df0, score0)]
-
-            # Original
-            # for delta in (-6.0, 6.0, -12.0, 12.0):
-            #     cols = _shift_columns_preview(columns_full, delta)
-            #     df_cand = _df_from_tables(_read_stream(area_str, cols))
-            #     score = self._score_template_a_alignment(df_cand)
-            #     candidates.append((delta, df_cand, score))
 
             # DEBUG ADD 10FEB
             for delta in (-15.0, -10.0, -6.0, 0, 6.0, 10.0, 15.0):
@@ -1653,7 +1541,6 @@ class TableHelper:
                     score = self._score_template_a_alignment(df_cand)
                     candidates.append((1000.0 + d1, df_cand, score))  # unique delta key, doesn’t matter
 
- 
             best_delta, df_best, best_score = max(candidates, key=lambda t: t[2])
  
             # Safety gate: only accept a non-zero delta if it's a *meaningful* improvement.
