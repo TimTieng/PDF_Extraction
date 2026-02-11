@@ -903,9 +903,7 @@ class TableHelper:
         tmp.loc[item_is_wordy, "denominaciones"] = tmp.loc[item_is_wordy, "item_asig"]
         tmp.loc[item_is_wordy, "item_asig"] = None
 
-        # ===============================
-        # PATCH 2: Repair "slipped item_asig into sub_titulo"
-        # ===============================
+        # DEBUG 10FEB UPDATE 2: Repair "slipped item_asig into sub_titulo"
         sub = tmp["sub_titulo"].fillna("").astype(str).str.strip()
         item = tmp["item_asig"].fillna("").astype(str).str.strip()
         denom = tmp["denominaciones"].fillna("").astype(str).str.strip()
@@ -932,12 +930,9 @@ class TableHelper:
 
         tmp.loc[mask_slip, "item_asig"] = sub[mask_slip]
         tmp.loc[mask_slip, "sub_titulo"] = None
-        # ===============================
-        # END PATCH 2
-        # ===============================
 
         # ===============================
-        # PATCH 4: If a 2-digit code appears in sub_titulo on a child row, move it to item_asig
+        # DEBUG 10FEB UPDATE 3: If a 2-digit code appears in sub_titulo on a child row, move it to item_asig
         #
         # NOTE:
         # Some PDFs print child item codes (e.g., "07") in the Sub-Título column
@@ -950,7 +945,7 @@ class TableHelper:
         # - item_asig is empty
         # - sub_titulo is a 2-digit code
         # - denominaciones is NOT an all-caps heading (so it's a detail row)
-        # ===============================
+
         sub = tmp["sub_titulo"].fillna("").astype(str).str.strip()
         item = tmp["item_asig"].fillna("").astype(str).str.strip()
         denom = tmp["denominaciones"].fillna("").astype(str).str.strip()
@@ -965,11 +960,7 @@ class TableHelper:
         )
 
         tmp.loc[mask_orphan_sub, "item_asig"] = sub[mask_orphan_sub]
-        tmp.loc[mask_orphan_sub, "sub_titulo"] = None
-        # ===============================
-        # END PATCH 4
-        # ===============================
-
+        tmp.loc[mask_orphan_sub, "sub_titulo"] = None # END DEBUG 10FBEB UPDATe 3
 
         return tmp
 
@@ -1623,8 +1614,8 @@ class TableHelper:
         bad_item = (~df["item_asig"].isna()) & (~df["item_asig"].astype(str).str.fullmatch(r"\d{1,3}", na=False))
 
         print(
-            f"[VALIDATE TemplateA page={page}] rows={len(df)} "
-            f"bad_sub={int(bad_sub.sum())} bad_item={int(bad_item.sum())}"
+            f"\n[VALIDATE TemplateA page={page}] rows={len(df)} "
+            f"bad_sub={int(bad_sub.sum())} bad_item={int(bad_item.sum())}\n"
         )
 
         if bad_sub.any():
