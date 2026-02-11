@@ -198,6 +198,62 @@ def test_sc_table_template_a_from_list():
             print(e)
 
 
+def test_service_component_table_template_b_single_page():
+    """
+    Test extraction of a single 5-column Template B service component table.
+    """
+    yaml_path = "config/chile_pdf.yaml"
+    config = load_yaml(yaml_path)
+    pdf_path = "data/chile_budget_2025.pdf"
+    page = 556
+
+    helper = TableHelper()
+
+    df = helper.extract_service_component_table_template_b(
+        pdf_path=pdf_path,
+        page=page,
+        config=config,
+    )
+
+    print("\n" + "=" * 80)
+    print(f"PAGE {page} — SERVICE COMPONENT TABLE (TEMPLATE B, 5 COL)")
+    print("=" * 80)
+    print(df)
+    print(f"\nExtracted rows={df.shape[0]}, cols={df.shape[1]} from page={page}")
+
+
+def test_sc_table_template_b_from_list():
+    """
+    Testing extraction of service component table Template B from a list of pages.
+    """
+    yaml_path = "config/chile_pdf.yaml"
+    config = load_yaml(yaml_path)
+    pdf_path = "data/chile_budget_2025.pdf"
+    # pages = [556,558,561,563,567,568,570]
+    pages = [556,558,561]
+
+    helper = TableHelper()
+
+    df = helper.extract_service_component_tables_template_b_from_list(
+        pdf_path=pdf_path,
+        pages=pages,
+        config=config,
+    )
+
+    for page in pages:
+        page_df = df[df["source_page"] == int(page)].copy()
+        page_df = page_df.drop(columns=["source_page", "has_glosas"], errors="ignore")
+
+        print("\n" + "=" * 80)
+        print(f"PAGE {page} — SERVICE COMPONENT TABLE (TEMPLATE B, 5 COL)")
+        print("=" * 80)
+        print(page_df.reset_index(drop=True))
+        print(
+            f"\nExtracted rows={page_df.shape[0]}, cols={page_df.shape[1]} "
+            f"from page={page}"
+        )
+
+
 # Primary Orchestration/Execution Function 
 # This is the main function that will be executed when the script runs
 def execute_tests() -> None:
@@ -223,6 +279,12 @@ def execute_tests() -> None:
 
     print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE A FROM LIST FUNCTION --------\n")
     test_sc_table_template_a_from_list()
+
+    # print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE B SINGLE PAGE FUNCTION --------\n")
+    # test_service_component_table_template_b_single_page()
+
+    print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE B FROM LIST FUNCTION --------\n")
+    test_sc_table_template_b_from_list()
     
 
 

@@ -227,6 +227,172 @@ class TableHelper:
         return re.sub(r"\s+", " ", (s or "").strip())
 
 
+    @staticmethod
+    def _replace_nan_with_none(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Force missing values to Python None so terminal/DataFrame output is consistent
+        with the rest of this project (showing None instead of NaN).
+        """
+        # Cast to object first; otherwise pandas may coerce None back to NaN for some dtypes.
+        out = df.copy().astype(object)
+        return out.where(pd.notna(out), None)
+
+
+    @staticmethod
+    def _drop_leading_table_header_rows(
+        df: pd.DataFrame,
+        *,
+        value_col: str,
+    ) -> pd.DataFrame:
+        """
+        Remove leading rows that belong to the PDF's visual table header
+        (e.g., "Sub-Título", "Ítem Asig.", "Glosa N°", "Moneda Nacional", "Miles de $").
+
+        Keeps only rows starting at the first likely financial data row.
+        """
+        if df is None or df.empty:
+            return df
+
+        tmp = df.copy()
+        if value_col not in tmp.columns:
+            return tmp
+
+        def _norm(v: Any) -> str:
+            return re.sub(r"\s+", " ", str(v or "")).strip().lower()
+
+        header_tokens = {
+            "sub-",
+            "sub",
+            "sub-titulo",
+            "sub título",
+            "titulo",
+            "ítem asig.",
+            "item asig.",
+            "glosa n°",
+            "glosa no",
+            "moneda nacional",
+            "miles de $",
+            "miles de",
+        }
+
+        def _is_money_like(s: str) -> bool:
+            return bool(re.fullmatch(r"[\d\.\,]+", s))
+
+        start_idx = 0
+        for i in range(len(tmp)):
+            row = tmp.iloc[i]
+            sub = _norm(row.get("sub_titulo"))
+            item = _norm(row.get("item_asign"))
+            denom = _norm(row.get("denominaciones"))
+            glosa = _norm(row.get("glosa_no"))
+            val = _norm(row.get(value_col))
+
+            tokens = {t for t in (sub, item, denom, glosa, val) if t}
+            has_header_token = any(t in header_tokens for t in tokens)
+
+            is_data_row = (
+                bool(re.fullmatch(r"\d{1,3}", sub))
+                or bool(re.fullmatch(r"\d{1,3}", item))
+                or denom in {"ingresos", "gastos"}
+                or _is_money_like(val)
+            )
+
+            if not has_header_token and is_data_row:
+                start_idx = i
+                break
+        else:
+            return tmp
+
+        return tmp.iloc[start_idx:].reset_index(drop=True)
+
+
+    @staticmethod
+    def _truncate_at_glosas_heading(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        If a mixed extraction accidentally includes the GLOSAS section,
+        keep only rows above the first GLOSAS heading row.
+        """
+        if df is None or df.empty or "denominaciones" not in df.columns:
+            return df
+
+        denom = df["denominaciones"].fillna("").astype(str).str.strip()
+        is_glosas = denom.str.match(r"^GLOSAS\s*:?\s*$", case=False, na=False)
+        if not is_glosas.any():
+            return df
+
+        cut_idx = int(is_glosas[is_glosas].index[0])
+        return df.iloc[:cut_idx].reset_index(drop=True)
+
+
+    @staticmethod
+    def _normalize_template_b_column_shape(
+        df: pd.DataFrame,
+        *,
+        expected_cols: int = 5,
+    ) -> pd.DataFrame:
+        """
+        Normalize Camelot output to Template B's 5 logical columns.
+
+        Strategy:
+        - Drop fully-empty columns.
+        - If more than 5 columns remain, keep the first 2 and last 2 as anchors,
+          and merge any middle columns into a single `denominaciones` text column.
+        """
+        if df is None or df.empty:
+            return df
+
+        tmp = df.copy()
+
+        # Normalize whitespace first so empties can be detected reliably.
+        for col in tmp.columns:
+            tmp[col] = (
+                tmp[col]
+                .astype(str)
+                .str.replace(r"\s+", " ", regex=True)
+                .str.strip()
+                .replace({"": None, "nan": None, "None": None})
+            )
+
+        # Drop fully empty columns caused by split boundaries.
+        tmp = tmp.dropna(axis=1, how="all")
+
+        if tmp.shape[1] == expected_cols:
+            return tmp
+
+        # Common failure mode: 6-8 columns where text was split across middle columns.
+        if tmp.shape[1] > expected_cols:
+            first = tmp.iloc[:, 0]
+            second = tmp.iloc[:, 1]
+            glosa = tmp.iloc[:, -2]
+            money = tmp.iloc[:, -1]
+            middle = tmp.iloc[:, 2:-2]
+
+            if middle.shape[1] == 0:
+                denom = pd.Series([None] * len(tmp), index=tmp.index)
+            else:
+                denom = (
+                    middle.apply(
+                        lambda r: " ".join(
+                            [str(x).strip() for x in r.tolist() if x is not None and str(x).strip()]
+                        ),
+                        axis=1,
+                    )
+                    .replace({"": None})
+                )
+
+            tmp = pd.DataFrame(
+                {
+                    0: first,
+                    1: second,
+                    2: denom,
+                    3: glosa,
+                    4: money,
+                }
+            )
+
+        return tmp
+
+
     def _extract_labeled_value(self, text: str, label_pattern: str) -> Optional[str]:
         """
         PURPOSE:
@@ -589,9 +755,12 @@ class TableHelper:
             )
             df = df.loc[~mask_page_num].reset_index(drop=True)
 
-        # Merge continuation only rows into the previous rows denominaciones column
-        required = {"sub_titulo", "item_asign", "denominaciones", "glosa_no", "moneda_clp_miles", "moneda_ext_usd_miles"}
-        if required.issubset(df.columns):
+        # Merge continuation-only rows into previous `denominaciones`.
+        # Support both Template A (6 cols with USD) and Template B (5 cols no USD).
+        req_common = {"sub_titulo", "item_asign", "denominaciones", "glosa_no", "moneda_clp_miles"}
+        has_usd_col = "moneda_ext_usd_miles" in df.columns
+
+        if req_common.issubset(df.columns):
             rows = []
             i = 0
             while i < len(df):
@@ -603,7 +772,7 @@ class TableHelper:
                     and cur.get("item_asign") is None
                     and cur.get("glosa_no") is None
                     and cur.get("moneda_clp_miles") is None
-                    and cur.get("moneda_ext_usd_miles") is None
+                    and (cur.get("moneda_ext_usd_miles") is None if has_usd_col else True)
                 )
 
                 if is_continuation_only and rows:
@@ -626,7 +795,7 @@ class TableHelper:
 
             df = pd.DataFrame(rows,columns=df.columns)
             
-        return df
+        return TableHelper._replace_nan_with_none(df)
 
 
     # ---------- GLOSAS TABLE EXTRACTION HELPER FUNCTIONS SECTION ----------
@@ -739,15 +908,21 @@ class TableHelper:
  
             page = doc[page_index]
  
-            # Find all occurrences of the keyword on the page
-            rects = page.search_for(keyword)
- 
+            # Find heading variants to avoid missing "GLOSAS :" / "GLOSAS:" formats.
+            variants: list[str] = [keyword, "GLOSAS :", "GLOSAS:", "GLOSAS"]
+            seen = set()
+            variants = [v for v in variants if v and not (v in seen or seen.add(v))]
+
+            rects = []
+            for term in variants:
+                rects.extend(page.search_for(term))
+
             if not rects:
                 # No glosas heading found; return unchanged
                 return base_table_area_str, None
- 
+
             # Filter matches by expected X region (helps prevent false positives)
-            candidates = [r for r in rects if (r.x0 >= x_min and r.x0 <= x_max)]
+            candidates = [r for r in rects if (float(r.x0) >= x_min and float(r.x0) <= x_max)]
             if not candidates:
                 candidates = rects  # fallback: use any match if X-filter removes all
  
@@ -763,6 +938,8 @@ class TableHelper:
         # Camelot expects y1 < y2; increasing y1 makes the bbox shorter (removes lower content).
         if y1 < glosas_y_pdf < y2:
             new_y1 = max(y1, glosas_y_pdf + float(pad_points))
+            if new_y1 >= y2:
+                return base_table_area_str, glosas_y_pdf
             new_area = self._format_camelot_area(x1, new_y1, x2, y2)
             return new_area, glosas_y_pdf
  
@@ -878,14 +1055,25 @@ class TableHelper:
         are wrongly placed in `item_asig` and split content appropriately.
         """
         tmp = df.copy()
-        tmp.columns = [
-            "sub_titulo",
-            "item_asig",
-            "denominaciones",
-            "glosa_no",
-            "moneda_nacional_miles_de_$CLP",
-            "moneda_ext_convertida_miles_USD",
-        ]
+        if tmp.shape[1] == 6:
+            tmp.columns = [
+                "sub_titulo",
+                "item_asig",
+                "denominaciones",
+                "glosa_no",
+                "moneda_nacional_miles_de_$CLP",
+                "moneda_ext_convertida_miles_USD",
+            ]
+        elif tmp.shape[1] == 5:
+            tmp.columns = [
+                "sub_titulo",
+                "item_asig",
+                "denominaciones",
+                "glosa_no",
+                "moneda_nacional_miles_de_$CLP",
+            ]
+        else:
+            return tmp
 
         # Define a regex pattern to match numeric keys followed by text
         numeric_with_text_pattern = r"^(\d{1,3})\s+(.+)$"
@@ -962,7 +1150,7 @@ class TableHelper:
         tmp.loc[mask_orphan_sub, "item_asig"] = sub[mask_orphan_sub]
         tmp.loc[mask_orphan_sub, "sub_titulo"] = None # END DEBUG 10FBEB UPDATe 3
 
-        return tmp
+        return TableHelper._replace_nan_with_none(tmp)
 
     # ---------- REPORT HEADER FUNCTIONS SECTION  ----------
     # Function that only extracts the main report header of each page 
@@ -1672,5 +1860,209 @@ class TableHelper:
         if not dfs:
             return pd.DataFrame()
  
+        return pd.concat(dfs, ignore_index=True)
+
+
+    def extract_service_component_table_template_b(
+        self,
+        pdf_path: str,
+        page: Union[int, str],
+        config: Dict[str, Any],
+    ) -> pd.DataFrame:
+        """
+        Extract a single 5-column Template B financial table from one PDF page.
+
+        Template B is the "no USD" variant:
+            [sub_titulo, item_asig, denominaciones, glosa_no, moneda_nacional]
+        """
+        tmpl = config["service_component_table_areas"]["template_b_no_usd"]
+
+        page_height = float(tmpl["page_height"])
+        expected_cols = int(tmpl["expected_cols"])
+        if expected_cols != 5:
+            raise ValueError(
+                f"Template B expected_cols must be 5, got {expected_cols}."
+            )
+
+        left, top, width, height = self._parse_csv_floats(
+            tmpl["table_area_preview"], expected_n=4
+        )
+        area_str = self._preview_bbox_to_camelot_area(
+            page_height=page_height,
+            left=left,
+            top=top,
+            width=width,
+            height=height,
+        )
+
+        # Keep extraction focused on financial rows if Glosas appears below.
+        area_str, _ = self._find_glosas_bbox_and_table_only_area(
+            pdf_path=pdf_path,
+            camelot_page=int(page),
+            base_table_area_str=area_str,
+            page_height=page_height,
+            x_min=0.0,
+            x_max=260.0,
+        )
+
+        def _best_table(tables):
+            return max(tables, key=lambda t: int(t.shape[0]) * int(t.shape[1]))
+
+        def _extract_from_area(area: str) -> pd.DataFrame:
+            # Re-apply glosas crop for every pass (including deeper rescue areas).
+            area, _ = self._find_glosas_bbox_and_table_only_area(
+                pdf_path=pdf_path,
+                camelot_page=int(page),
+                base_table_area_str=area,
+                page_height=page_height,
+                x_min=0.0,
+                x_max=260.0,
+            )
+
+            # Start with lattice (stable when ruling lines exist), then fallback to stream.
+            tables = camelot.read_pdf(
+                filepath=pdf_path,
+                pages=str(page),
+                flavor="lattice",
+                table_areas=[area],
+            )
+
+            # Fallback to stream if lattice found nothing OR wrong shape.
+            lattice_df = _best_table(tables).df if tables.n > 0 else pd.DataFrame()
+            lattice_df = self._normalize_template_b_column_shape(
+                lattice_df, expected_cols=expected_cols
+            )
+
+            if tables.n == 0 or lattice_df.shape[1] != expected_cols:
+                tables = camelot.read_pdf(
+                    filepath=pdf_path,
+                    pages=str(page),
+                    flavor="stream",
+                    table_areas=[area],
+                    split_text=False,
+                )
+
+            if tables.n == 0:
+                raise RuntimeError(
+                    f"No tables found by Camelot on page={page} using area={area}."
+                )
+
+            df_local = _best_table(tables).df
+            df_local = self._normalize_template_b_column_shape(df_local, expected_cols=expected_cols)
+            if df_local.shape[1] != expected_cols:
+                raise ValueError(
+                    f"Template B extraction failed validation: expected {expected_cols} columns, "
+                    f"got {df_local.shape[1]} (page={page}, area={area})."
+                )
+
+            df_local.columns = [
+                "sub_titulo",
+                "item_asign",
+                "denominaciones",
+                "glosa_no",
+                "moneda_clp_miles",
+            ]
+            df_local = self._drop_leading_table_header_rows(
+                df_local, value_col="moneda_clp_miles"
+            )
+            df_local = self._clean_service_component_table(df_local)
+            df_local.columns = [
+                "sub_titulo",
+                "item_asig",
+                "denominaciones",
+                "glosa_no",
+                "moneda_nacional_miles_de_$CLP",
+            ]
+            df_local = self._post_process_extracted_table(df_local)
+            df_local = self._truncate_at_glosas_heading(df_local)
+            return self._replace_nan_with_none(df_local)
+
+        df = _extract_from_area(area_str)
+
+        # Tail rescue: some pages clip rows below "INICIATIVAS DE INVERSIÓN" and/or debt lines.
+        def _tail_flags(df_: pd.DataFrame) -> dict[str, bool]:
+            d = df_["denominaciones"].fillna("").astype(str).str.casefold()
+            return {
+                "has_iniciativas": d.str.contains("iniciativas de inversión", regex=False).any()
+                or d.str.contains("iniciativas de inversion", regex=False).any(),
+                "has_proyectos": d.str.contains("proyectos", regex=False).any(),
+                "has_debt_header": d.str.contains("servicio de la deuda", regex=False).any(),
+                "has_deuda_flotante": d.str.contains("deuda flotante", regex=False).any(),
+            }
+
+        def _tail_score(df_: pd.DataFrame) -> int:
+            flags = _tail_flags(df_)
+            score = 0
+            if flags["has_iniciativas"]:
+                score += 2
+            if flags["has_proyectos"]:
+                score += 4
+            if flags["has_debt_header"]:
+                score += 4
+            if flags["has_deuda_flotante"]:
+                score += 6
+            return score
+
+        flags0 = _tail_flags(df)
+        needs_tail_rescue = (
+            (flags0["has_iniciativas"] and not flags0["has_proyectos"])
+            or (flags0["has_debt_header"] and not flags0["has_deuda_flotante"])
+        )
+
+        if needs_tail_rescue:
+            x1, y1, x2, y2 = self._parse_camelot_area(area_str)
+            candidates: list[pd.DataFrame] = [df]
+
+            for delta in (80.0, 140.0, 200.0, 260.0):
+                rescue_area = self._format_camelot_area(x1, max(0.0, y1 - delta), x2, y2)
+                try:
+                    df_rescue = _extract_from_area(rescue_area)
+                    candidates.append(df_rescue)
+                except Exception:
+                    continue
+
+            # Prefer more complete tail markers first, then longer table.
+            df = max(candidates, key=lambda cand: (_tail_score(cand), len(cand)))
+
+        return df
+
+
+    def extract_service_component_tables_template_b_from_list(
+        self,
+        pdf_path: str,
+        pages: list[int],
+        config: dict,
+    ) -> pd.DataFrame:
+        """
+        Extract Template B (5-column) service component tables for multiple pages
+        and combine results.
+
+        Args:
+            pdf_path: Path to the PDF file.
+            pages: List of Camelot 1-based page numbers to extract.
+            config: Loaded YAML config dict containing `service_component_table_areas`.
+
+        Returns:
+            Combined DataFrame with two extra columns:
+            - source_page: int (Camelot 1-based page)
+            - has_glosas: bool (placeholder; currently set False)
+        """
+        dfs: list[pd.DataFrame] = []
+
+        for p in pages:
+            df = self.extract_service_component_table_template_b(
+                pdf_path=pdf_path,
+                page=p,
+                config=config,
+            )
+
+            df = df.copy()
+            df["source_page"] = int(p)
+            df["has_glosas"] = False  # placeholder
+            dfs.append(df)
+
+        if not dfs:
+            return pd.DataFrame()
+
         return pd.concat(dfs, ignore_index=True)
  # ---------- END OF SCRIPT ----------
