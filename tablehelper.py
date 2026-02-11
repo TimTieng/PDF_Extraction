@@ -2004,8 +2004,12 @@ class TableHelper:
             return score
 
         flags0 = _tail_flags(df)
+        # Broaden trigger:
+        # If Deuda Flotante is missing, we likely have a truncated tail on Template B pages.
+        # Keep existing targeted checks as well.
         needs_tail_rescue = (
-            (flags0["has_iniciativas"] and not flags0["has_proyectos"])
+            (not flags0["has_deuda_flotante"])
+            or (flags0["has_iniciativas"] and not flags0["has_proyectos"])
             or (flags0["has_debt_header"] and not flags0["has_deuda_flotante"])
         )
 
@@ -2013,7 +2017,7 @@ class TableHelper:
             x1, y1, x2, y2 = self._parse_camelot_area(area_str)
             candidates: list[pd.DataFrame] = [df]
 
-            for delta in (80.0, 140.0, 200.0, 260.0):
+            for delta in (80.0, 140.0, 200.0, 260.0, 320.0):
                 rescue_area = self._format_camelot_area(x1, max(0.0, y1 - delta), x2, y2)
                 try:
                     df_rescue = _extract_from_area(rescue_area)

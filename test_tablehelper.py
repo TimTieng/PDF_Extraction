@@ -230,7 +230,7 @@ def test_sc_table_template_b_from_list():
     config = load_yaml(yaml_path)
     pdf_path = "data/chile_budget_2025.pdf"
     # pages = [556,558,561,563,567,568,570]
-    pages = [556,558,561]
+    pages = [556,558,561,563,567,568,570,572,573,574,576,577,580,581]
 
     helper = TableHelper()
 
@@ -247,7 +247,13 @@ def test_sc_table_template_b_from_list():
         print("\n" + "=" * 80)
         print(f"PAGE {page} — SERVICE COMPONENT TABLE (TEMPLATE B, 5 COL)")
         print("=" * 80)
-        print(page_df.reset_index(drop=True))
+        with pd.option_context(
+            "display.max_columns", None,
+            "display.max_colwidth", None,
+            "display.width", 2000,
+            "display.expand_frame_repr", False,
+        ):
+            print(page_df.reset_index(drop=True).to_string(index=True))
         print(
             f"\nExtracted rows={page_df.shape[0]}, cols={page_df.shape[1]} "
             f"from page={page}"
@@ -277,8 +283,8 @@ def execute_tests() -> None:
     # print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE A FUNCTION --------\n")
     # test_service_component_table_template_a()
 
-    print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE A FROM LIST FUNCTION --------\n")
-    test_sc_table_template_a_from_list()
+    # print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE A FROM LIST FUNCTION --------\n")
+    # test_sc_table_template_a_from_list()
 
     # print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE B SINGLE PAGE FUNCTION --------\n")
     # test_service_component_table_template_b_single_page()
