@@ -283,8 +283,8 @@ def execute_tests() -> None:
     # print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE A FUNCTION --------\n")
     # test_service_component_table_template_a()
 
-    # print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE A FROM LIST FUNCTION --------\n")
-    # test_sc_table_template_a_from_list()
+    print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE A FROM LIST FUNCTION --------\n")
+    test_sc_table_template_a_from_list()
 
     # print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE B SINGLE PAGE FUNCTION --------\n")
     # test_service_component_table_template_b_single_page()
