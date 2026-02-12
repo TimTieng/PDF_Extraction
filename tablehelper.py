@@ -1957,7 +1957,7 @@ class TableHelper:
 
             df_local.columns = [
                 "sub_titulo",
-                "item_asign",
+                "item_asig",
                 "denominaciones",
                 "glosa_no",
                 "moneda_clp_miles",
