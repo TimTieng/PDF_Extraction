@@ -260,6 +260,95 @@ def test_sc_table_template_b_from_list():
         )
 
 
+def test_extract_glosas_section_from_list():
+    """
+    PURPOSE:
+        Test extraction of the GLOSAS section using PyMuPDF text extraction,
+        stitching continuation pages when needed.
+
+    NOTES:
+        - This test reads the page height/width directly from the PDF via PyMuPDF
+          to avoid hard-coding dimensions.
+        - Update `pages` to the pages where you expect a GLOSAS section to start.
+    """
+    import pymupdf  # local import to keep dependencies obvious
+
+    yaml_path = "config/chile_pdf.yaml"
+    _ = load_yaml(yaml_path)  # currently unused, but kept for consistency with other tests
+
+    pdf_path = "data/chile_budget_2025.pdf"
+
+    # Pages the GLOSAS heading  appear (start pages)
+    pages = [555, 556, 558, 559, 561, 563,566,567,568, 570, 572, 573, 575,576, 577, 580, 581, 582]
+
+    helper = TableHelper()
+
+    with pymupdf.open(pdf_path) as doc:
+        for page in pages:
+            print("\n" + "=" * 80)
+            print(f"PAGE {page} — GLOSAS SECTION")
+            print("=" * 80)
+
+            page_idx = int(page) - 1
+            if page_idx < 0 or page_idx >= doc.page_count:
+                print(f"SKIP: page {page} out of range (doc has {doc.page_count} pages)")
+                continue
+
+            # Pull page dimensions straight from the PDF
+            page_obj = doc[page_idx]
+            page_height = float(page_obj.rect.height)
+            page_width = float(page_obj.rect.width)
+
+            try:
+                res = helper.extract_glosas_section(
+                    pdf_path=pdf_path,
+                    page=int(page),
+                    page_height=page_height,
+                    page_width=page_width,
+                    keyword="GLOSAS",
+                    max_pages=3,
+                    footer_cut_points=45.0,
+                    debug=True,
+                )
+
+                if not res.get("found"):
+                    print("GLOSAS heading not found on this page.")
+                    continue
+
+                print(f"Start page: {res.get('start_page')} | End page: {res.get('end_page')}")
+                pages_used = [p.get("page") for p in res.get("pages", [])]
+                print(f"Pages stitched: {pages_used}")
+
+                full_text = res.get("text", "") or ""
+                # Print Full Text
+                print("\n--- FULL EXTRACTED TEXT ---")
+                print(full_text)
+
+                # Uncomment below for quick preview of text segments in terminal (adjust char counts as needed)
+                # print("\n--- TEXT (first 800 chars) ---")
+                # print(full_text[:800])
+
+                # if len(full_text) > 800:
+                #     print("\n--- TEXT (last 400 chars) ---")
+                #     print(full_text[-400:])
+
+                # Quick sanity checks: page number leakage is a common failure mode
+                # (this is heuristic; adjust if your PDFs contain numeric-only lines legitimately)
+                leaked = [ln for ln in full_text.splitlines()[-8:] if ln.strip().isdigit()]
+                if leaked:
+                    print("\nWARNING: potential footer/page-number leakage near end:")
+                    print(leaked)
+
+                if res.get("debug"):
+                    # Print bbox diagnostics (PDF-space regions)
+                    print("\n--- DEBUG REGIONS ---")
+                    for r in res["debug"].get("regions", []):
+                        print(f"page={r['page']} region_pdf={r['region_pdf']} lines={r['lines']}")
+
+            except Exception as e:
+                print(f"FAILED on page {page}")
+                print(e)
+
 # Primary Orchestration/Execution Function 
 # This is the main function that will be executed when the script runs
 def execute_tests() -> None:
@@ -283,14 +372,17 @@ def execute_tests() -> None:
     # print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE A FUNCTION --------\n")
     # test_service_component_table_template_a()
 
-    print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE A FROM LIST FUNCTION --------\n")
-    test_sc_table_template_a_from_list()
+    # print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE A FROM LIST FUNCTION --------\n")
+    # test_sc_table_template_a_from_list()
 
     # print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE B SINGLE PAGE FUNCTION --------\n")
     # test_service_component_table_template_b_single_page()
 
-    print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE B FROM LIST FUNCTION --------\n")
-    test_sc_table_template_b_from_list()
+    # print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE B FROM LIST FUNCTION --------\n")
+    # test_sc_table_template_b_from_list()
+
+    print("-------- TESTING GLOSAS EXTRACTION FROM LIST FUNCTION --------\n")
+    test_extract_glosas_section_from_list()
     
 
 

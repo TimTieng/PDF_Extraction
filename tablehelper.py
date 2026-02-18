@@ -225,6 +225,90 @@ class TableHelper:
         A string with collapsed spaces and trimmed ends.
         """
         return re.sub(r"\s+", " ", (s or "").strip())
+    
+
+    # Unified helper: find heading rect (PyMuPDF) + convert to PDF/Camelot Y
+    def _find_heading_rect_and_pdf_y(
+        self,
+        *,
+        pdf_path: str,
+        camelot_page: int,
+        page_height: float,
+        heading: str,
+        variants: Optional[list[str]] = None,
+        x_min: float = 0.0,
+        x_max: float = 220.0,
+    ) -> tuple[Optional[Any], Optional[float]]:
+        """
+        PURPOSE:
+            Find a heading on a page using PyMuPDF, return the best matching rect (PyMuPDF coords),
+            and the converted Y coordinate in PDF/Camelot space.
+
+        WHY:
+            You currently have two near-duplicates:
+              - _find_glosas_bbox_and_table_only_area()
+              - _crop_table_area_above_glosas()
+            This helper unifies the heading search + coordinate conversion, so the logic cannot drift.
+
+        PARAMETERS:
+            pdf_path:
+                Path to the PDF file.
+            camelot_page:
+                1-based page number (Camelot convention).
+            page_height:
+                Page height in points.
+            heading:
+                Canonical heading text (e.g., "GLOSAS").
+            variants:
+                Optional explicit list of search variants.
+                If None, defaults to common punctuation variants for the heading.
+            x_min, x_max:
+                Optional left-bound filter in PyMuPDF coords to reduce false positives.
+
+        RETURNS:
+            (best_rect, heading_y_pdf)
+            - best_rect: PyMuPDF Rect of the best match, or None if not found.
+            - heading_y_pdf: The converted PDF/Camelot y (float) using rect.y0, or None if not found.
+        """
+        if variants is None:
+            # Common variants: "GLOSAS", "GLOSAS:", "GLOSAS :"
+            variants = [heading, f"{heading} :", f"{heading}:", heading]
+
+        # Deduplicate while preserving order
+        seen = set()
+        variants = [v for v in variants if v and not (v in seen or seen.add(v))]
+
+        page_index = int(camelot_page) - 1
+        if page_index < 0:
+            raise RuntimeError(f"Invalid camelot_page={camelot_page}; must be >= 1")
+
+        with pymupdf.open(pdf_path) as doc:
+            if page_index >= doc.page_count:
+                raise RuntimeError(
+                    f"camelot_page={camelot_page} is out of range for this PDF "
+                    f"(doc has {doc.page_count} pages; max camelot_page={doc.page_count})."
+                )
+
+            page = doc[page_index]
+
+            rects: list[Any] = []
+            for term in variants:
+                rects.extend(page.search_for(term))
+
+            if not rects:
+                return None, None
+
+            # Filter by x0 region to avoid false positives, if possible
+            candidates = [r for r in rects if (float(r.x0) >= x_min and float(r.x0) <= x_max)]
+            if not candidates:
+                candidates = rects  # fallback
+
+            # Choose "best": leftmost then topmost (standalone headings tend to be left-aligned)
+            best = sorted(candidates, key=lambda r: (float(r.x0), float(r.y0)))[0]
+
+            # Convert PyMuPDF y0 (top-origin) to PDF/Camelot y (bottom-origin)
+            heading_y_pdf = float(page_height) - float(best.y0)
+            return best, heading_y_pdf
 
 
     @staticmethod
@@ -851,100 +935,33 @@ class TableHelper:
         pad_points: float = 8.0,
     ) -> tuple[str, float | None]:
         """
-        Find the 'GLOSAS' heading on a PDF page using PyMuPDF, convert its coordinates for Camelot,
-        and return a new Camelot bbox string that excludes the Glosas section (table-only region).
- 
-        This is designed for pages where the main budget table and the Glosas section appear on the
-        same page. The main table is above the Glosas heading. We:
-          1) Search for the exact heading text (default: "GLOSAS") using PyMuPDF.
-          2) Convert the found text rectangle's Y coordinate from PyMuPDF space (top-left origin)
-             to PDF/Camelot space (bottom-left origin) using the page height.
-          3) Adjust the *bottom* (y1) of the provided `base_table_area_str` so the table bbox ends
-             just above the Glosas heading.
- 
-        Coordinate notes (important):
-            - PyMuPDF returns rectangles in a coordinate space where Y grows downward from the top.
-            - Camelot/PDF coordinates use bottom-left origin where Y grows upward.
-            - Conversion: pdf_y = page_height - pymupdf_y
- 
-        Page numbering notes:
-            - Camelot pages are 1-based.
-            - PyMuPDF pages are 0-based.
-            - This function expects `camelot_page` (1-based) and converts internally.
- 
-        Args:
-            pdf_path: Path to the PDF file.
-            camelot_page: Page number in Camelot terms (1-based).
-            base_table_area_str: Camelot bbox string "x1,y1,x2,y2" for a region that may include Glosas.
-            page_height: Page height in points (e.g., 751.19). Must match the target page.
-            keyword: Text to search for. Default "GLOSAS" (all caps).
-            x_min: Optional left bound filter in PyMuPDF coords to reduce false matches.
-            x_max: Optional right bound filter in PyMuPDF coords to reduce false matches.
-            pad_points: Padding (in points) added above the Glosas heading when cropping the table-only bbox.
- 
-        Returns:
-            (new_table_area_str, glosas_cut_y_pdf)
-            - new_table_area_str: Camelot bbox string for the table-only region. If keyword not found,
-              returns `base_table_area_str` unchanged.
-            - glosas_cut_y_pdf: The computed cut line in PDF/Camelot Y coords (float), or None if not found.
- 
-        Raises:
-            ValueError: If `base_table_area_str` is malformed.
-            RuntimeError: If the requested page index is out of bounds.
+        Find the 'GLOSAS' heading and crop the table bbox to exclude glosas (table-only area).
         """
         x1, y1, x2, y2 = self._parse_camelot_area(base_table_area_str)
- 
-        # Convert Camelot page (1-based) to PyMuPDF page index (0-based)
-        page_index = int(camelot_page) - 1
-        if page_index < 0:
-            raise RuntimeError(f"Invalid camelot_page={camelot_page}; must be >= 1")
- 
-        with pymupdf.open(pdf_path) as doc:
-            if page_index >= doc.page_count:
-                raise RuntimeError(
-                    f"camelot_page={camelot_page} is out of range for this PDF "
-                    f"(doc has {doc.page_count} pages; max camelot_page={doc.page_count})."
-                )
- 
-            page = doc[page_index]
- 
-            # Find heading variants to avoid missing "GLOSAS :" / "GLOSAS:" formats.
-            variants: list[str] = [keyword, "GLOSAS :", "GLOSAS:", "GLOSAS"]
-            seen = set()
-            variants = [v for v in variants if v and not (v in seen or seen.add(v))]
 
-            rects = []
-            for term in variants:
-                rects.extend(page.search_for(term))
+        _rect, glosas_y_pdf = self._find_heading_rect_and_pdf_y(
+            pdf_path=pdf_path,
+            camelot_page=camelot_page,
+            page_height=page_height,
+            heading=keyword,
+            variants=[keyword, "GLOSAS :", "GLOSAS:", "GLOSAS"],
+            x_min=x_min,
+            x_max=x_max,
+        )
 
-            if not rects:
-                # No glosas heading found; return unchanged
-                return base_table_area_str, None
+        if glosas_y_pdf is None:
+            return base_table_area_str, None
 
-            # Filter matches by expected X region (helps prevent false positives)
-            candidates = [r for r in rects if (float(r.x0) >= x_min and float(r.x0) <= x_max)]
-            if not candidates:
-                candidates = rects  # fallback: use any match if X-filter removes all
- 
-            # Choose the "best" match:
-            # - typically, the title "GLOSAS" is a standalone heading, so pick the leftmost/topmost candidate.
-            # - prioritize smallest x0 (left margin), then smallest y0 (higher on page).
-            best = sorted(candidates, key=lambda r: (r.x0, r.y0))[0]
- 
-            # PyMuPDF y0 is top of the rectangle in top-left origin space
-            glosas_y_pdf = float(page_height) - float(best.y0)
- 
-        # If the glosas cut line is within our base bbox vertical span, crop the bottom upward.
-        # Camelot expects y1 < y2; increasing y1 makes the bbox shorter (removes lower content).
+        # If cut falls inside bbox, crop bottom upward
         if y1 < glosas_y_pdf < y2:
             new_y1 = max(y1, glosas_y_pdf + float(pad_points))
             if new_y1 >= y2:
                 return base_table_area_str, glosas_y_pdf
             new_area = self._format_camelot_area(x1, new_y1, x2, y2)
             return new_area, glosas_y_pdf
- 
-        # If the match is outside the bbox span, leave unchanged (likely bbox already excludes it)
+
         return base_table_area_str, glosas_y_pdf
+
  
  
     def _crop_table_area_above_glosas(
@@ -957,51 +974,30 @@ class TableHelper:
         pad_points: float = 8.0,
     ) -> tuple[str, float | None]:
         """
-        Find the 'GLOSAS' heading on a page (PyMuPDF), convert coordinates to PDF/Camelot space,
-        and crop a Camelot table_areas bbox so it excludes the Glosas section.
- 
-        Args:
-            pdf_path: Path to PDF.
-            camelot_page: 1-based page number (Camelot convention).
-            base_table_area_str: Camelot bbox string "x1,y1,x2,y2" (PDF coords, origin bottom-left).
-            page_height: Page height in points.
-            pad_points: Extra padding above the GLOSAS heading to avoid clipping the last table row.
- 
-        Returns:
-            (new_table_area_str, glosas_cut_y_pdf)
-            - new_table_area_str: Cropped bbox string. Unchanged if GLOSAS not found.
-            - glosas_cut_y_pdf: Y coordinate (PDF/Camelot space) of the top of the GLOSAS heading, or None.
+        Find the 'GLOSAS' heading and crop a Camelot table_areas bbox so it excludes the glosas section.
         """
         x1, y1, x2, y2 = (float(v.strip()) for v in base_table_area_str.split(","))
- 
-        page_index = camelot_page - 1
-        if page_index < 0:
-            raise ValueError("camelot_page must be >= 1")
- 
-        with pymupdf.open(pdf_path) as doc:
-            page = doc.load_page(page_index)
- 
-            # Try a couple common variants
-            rects = page.search_for("GLOSAS :")
-            if not rects:
-                rects = page.search_for("GLOSAS:")
- 
-            if not rects:
-                return base_table_area_str, None
- 
-            # If multiple matches, pick the leftmost/topmost
-            rect = sorted(rects, key=lambda r: (r.x0, r.y0))[0]
- 
-            # Convert PyMuPDF y0 (top-origin) to PDF y (bottom-origin)
-            glosas_cut_y_pdf = float(page_height) - float(rect.y0)
- 
-        # Crop only if the cut falls inside the bbox vertical span
-        if y1 < glosas_cut_y_pdf < y2:
-            new_y1 = max(y1, glosas_cut_y_pdf + pad_points)
+
+        _rect, glosas_y_pdf = self._find_heading_rect_and_pdf_y(
+            pdf_path=pdf_path,
+            camelot_page=camelot_page,
+            page_height=page_height,
+            heading="GLOSAS",
+            variants=["GLOSAS :", "GLOSAS:", "GLOSAS"],
+            x_min=0.0,
+            x_max=220.0,
+        )
+
+        if glosas_y_pdf is None:
+            return base_table_area_str, None
+
+        if y1 < glosas_y_pdf < y2:
+            new_y1 = max(y1, glosas_y_pdf + float(pad_points))
             new_area = f"{x1},{new_y1},{x2},{y2}"
-            return new_area, glosas_cut_y_pdf
- 
-        return base_table_area_str, None
+            return new_area, glosas_y_pdf
+
+        return base_table_area_str, glosas_y_pdf
+
  
 
     #DEBUG ADD 10FEB
@@ -2069,4 +2065,261 @@ class TableHelper:
             return pd.DataFrame()
 
         return pd.concat(dfs, ignore_index=True)
+    
+
+    # ---------- EXTRACT GLOSAS SECTION -------------
+    def extract_glosas_section(
+        self,
+        *,
+        pdf_path: str,
+        page: int,
+        page_height: float,
+        page_width: float,
+        keyword: str = "GLOSAS",
+        max_pages: int = 3,
+        footer_cut_points: float = 40.0,
+        left_pad: float = 18.0,
+        right_pad: float = 18.0,
+        heading_pad_points: float = 6.0,
+        debug: bool = False,
+    ) -> dict:
+        """
+        PURPOSE:
+            Extract the full GLOSAS section starting on `page`, stitching continuation onto follow-on pages.
+
+        NOTES:
+            - Uses PyMuPDF text extraction (not Camelot).
+            - Uses unified heading detection + coordinate conversion helper.
+            - Excludes page numbers/footers via a bottom cut (and optional line filtering).
+            - Continuation is heuristic-based; hard-capped by `max_pages`.
+
+        PARAMETERS:
+            pdf_path:
+                Path to PDF.
+            page:
+                1-based page number (Camelot convention).
+            page_height:
+                Height of the PDF page in points.
+            page_width:
+                Width of the PDF page in points.
+            keyword:
+                Heading text (default: "GLOSAS").
+            max_pages:
+                Safety cap for stitching pages (you observed max ~2.5 pages).
+            footer_cut_points:
+                Height of bottom strip to exclude (prevents page number leakage).
+                You can align this with your existing `mask_num` behavior.
+            left_pad, right_pad:
+                Horizontal padding for text bbox.
+            heading_pad_points:
+                Offset added below heading to start text extraction after the title line.
+            debug:
+                Include bbox + per-page diagnostics.
+
+        RETURNS:
+            dict with keys:
+                - found (bool)
+                - start_page (int)
+                - end_page (int | None)
+                - text (str)
+                - pages (list[dict]): [{page, text, ...}]
+                - debug (dict) if debug=True
+        """
+        # -------------------------
+        # Nested helpers (local-only); only used in this specific function
+        # -------------------------
+        def _rects_to_lines_in_region(page_obj, *, region: tuple[float, float, float, float]) -> list[str]:
+            """
+            Extract line strings for content intersecting region bbox (PDF space).
+            Region is (x0, y0, x1, y1) in PDF/Camelot coords (origin bottom-left).
+            """
+            x0, y0, x1, y1 = region
+
+            # PyMuPDF uses top-left origin; convert region to PyMuPDF coords for filtering
+            # PyMuPDF y = page_height - pdf_y
+            pym_y_top = float(page_height) - float(y1)  # pdf y1 is top in PDF-space
+            pym_y_bot = float(page_height) - float(y0)  # pdf y0 is bottom
+
+            pym_x0, pym_x1 = float(x0), float(x1)
+
+            text = page_obj.get_text("dict")
+            out_lines: list[tuple[float, float, str]] = []
+
+            for block in text.get("blocks", []):
+                for line in block.get("lines", []):
+                    # line bbox in PyMuPDF coords
+                    lb = line.get("bbox", None)
+                    if not lb or len(lb) != 4:
+                        continue
+                    lx0, ly0, lx1, ly1 = map(float, lb)
+
+                    # Intersect check with region in PyMuPDF coords
+                    # Region in PyMuPDF: x in [pym_x0, pym_x1], y in [pym_y_top, pym_y_bot]
+                    if lx1 < pym_x0 or lx0 > pym_x1:
+                        continue
+                    if ly1 < pym_y_top or ly0 > pym_y_bot:
+                        continue
+
+                    # Build the line text from spans
+                    spans = line.get("spans", [])
+                    s = "".join((sp.get("text", "") for sp in spans)).strip()
+                    if not s:
+                        continue
+
+                    # Use ly0, lx0 for ordering (top-to-bottom, left-to-right)
+                    out_lines.append((ly0, lx0, s))
+
+            out_lines.sort(key=lambda t: (t[0], t[1]))
+            return [t[2] for t in out_lines]
+
+        def _is_probable_page_number(line: str) -> bool:
+            # Common in these PDFs: a centered number at the bottom (e.g., "570")
+            return bool(re.match(r"^\s*\d{2,5}\s*$", line))
+
+        def _normalize_and_join(lines: list[str]) -> str:
+            """
+            Minimal joining/cleanup:
+              - remove obvious page number lines
+              - join hyphen-wrapped lines
+              - join wrapped lines when next line is a continuation
+            """
+            cleaned: list[str] = []
+            for ln in lines:
+                ln = re.sub(r"\s+", " ", ln).strip()
+                if not ln:
+                    continue
+                if _is_probable_page_number(ln):
+                    continue
+                cleaned.append(ln)
+
+            joined: list[str] = []
+            for ln in cleaned:
+                if not joined:
+                    joined.append(ln)
+                    continue
+
+                prev = joined[-1]
+
+                # Hyphen wrap: "progra-" + "mación" -> "programación"
+                if prev.endswith("-") and ln and ln[0].islower():
+                    joined[-1] = prev[:-1] + ln
+                    continue
+
+                # Continuation heuristic: join when previous doesn't end with strong punctuation
+                # and the next line looks like continuation (lowercase, dash, or "–")
+                if (not re.search(r"[.:;!?)]\s*$", prev)) and (ln[:1].islower() or ln.startswith(("–", "-", "—"))):
+                    joined[-1] = prev + " " + ln
+                    continue
+
+                joined.append(ln)
+
+            return "\n".join(joined).strip()
+
+        def _build_region_for_start_page(glosas_y_pdf: float) -> tuple[float, float, float, float]:
+            # PDF coords: (x0, y0, x1, y1) where y0 < y1
+            x0 = float(left_pad)
+            x1 = float(page_width) - float(right_pad)
+            y1 = max(0.0, float(glosas_y_pdf) - float(heading_pad_points))  # top of region just below heading
+            y0 = float(footer_cut_points)  # bottom cutoff to avoid page number/footer
+            if y0 >= y1:
+                y0 = max(0.0, y1 - 1.0)
+            return (x0, y0, x1, y1)
+
+        def _build_region_for_continuation_page() -> tuple[float, float, float, float]:
+            # Start near top margin; stop above footer
+            x0 = float(left_pad)
+            x1 = float(page_width) - float(right_pad)
+            y1 = float(page_height) - 24.0  # slight top margin (tune if needed)
+            y0 = float(footer_cut_points)
+            if y0 >= y1:
+                y0 = max(0.0, y1 - 1.0)
+            return (x0, y0, x1, y1)
+
+        def _looks_like_continuation(text_block: str) -> bool:
+            """
+            Heuristic: continuation pages often begin with numbered items or bullets.
+            Tune this once you see real pages.
+            """
+            if not text_block:
+                return False
+            head = "\n".join(text_block.splitlines()[:10])
+            if re.search(r"^\s*\d{2}\s+", head, flags=re.M):
+                return True
+            if re.search(r"^\s*[a-z]\)\s+", head, flags=re.M):
+                return True
+            if "GLOSAS" in head.upper():
+                return True
+            return False
+
+        # 1) Find glosas heading on the start page
+        rect, glosas_y_pdf = self._find_heading_rect_and_pdf_y(
+            pdf_path=pdf_path,
+            camelot_page=int(page),
+            page_height=float(page_height),
+            heading=keyword,
+            variants=[keyword, f"{keyword} :", f"{keyword}:", keyword],
+            x_min=0.0,
+            x_max=220.0,
+        )
+
+        if glosas_y_pdf is None:
+            return {
+                "found": False,
+                "start_page": int(page),
+                "end_page": None,
+                "text": "",
+                "pages": [],
+                **({"debug": {"reason": "heading_not_found", "keyword": keyword}} if debug else {}),
+            }
+
+        # 2) Extract text for start page region (below heading, above footer)
+        pages_out: list[dict] = []
+        debug_out: dict = {"regions": [], "heading_y_pdf": glosas_y_pdf} if debug else {}
+
+        with pymupdf.open(pdf_path) as doc:
+            start_idx = int(page) - 1
+            end_idx = min(doc.page_count - 1, start_idx + int(max_pages) - 1)
+
+            # Start page extraction
+            p0 = doc[start_idx]
+            region0 = _build_region_for_start_page(float(glosas_y_pdf))
+            lines0 = _rects_to_lines_in_region(p0, region=region0)
+            text0 = _normalize_and_join(lines0)
+
+            pages_out.append({"page": int(page), "text": text0})
+            if debug:
+                debug_out["regions"].append({"page": int(page), "region_pdf": region0, "lines": len(lines0)})
+
+            # 3) Continuation pages: extract top-to-footer until stop condition
+            last_page_used = int(page)
+            for idx in range(start_idx + 1, end_idx + 1):
+                pN = doc[idx]
+                regionN = _build_region_for_continuation_page()
+                linesN = _rects_to_lines_in_region(pN, region=regionN)
+                textN = _normalize_and_join(linesN)
+
+                # Stop if it doesn't look like continuation
+                if not _looks_like_continuation(textN):
+                    break
+
+                page_num = idx + 1  # back to 1-based
+                pages_out.append({"page": page_num, "text": textN})
+                last_page_used = page_num
+
+                if debug:
+                    debug_out["regions"].append({"page": page_num, "region_pdf": regionN, "lines": len(linesN)})
+
+        # 4) Stitch full text
+        full_text = "\n\n".join([p["text"] for p in pages_out if p.get("text")]).strip()
+
+        out = {
+            "found": True,
+            "start_page": int(page),
+            "end_page": (pages_out[-1]["page"] if pages_out else int(page)),
+            "text": full_text,
+            "pages": pages_out,
+        }
+        if debug:
+            out["debug"] = debug_out
+        return out
  # ---------- END OF SCRIPT ----------
