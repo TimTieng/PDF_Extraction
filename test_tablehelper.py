@@ -366,20 +366,20 @@ def execute_tests() -> None:
     # print("\n-------- TESTING EXTRACT SIDE REPORT HEADER RETURN LIST FUNCTION --------\n")
     # test_extract_side_report_header_return_list()
 
-    # print("\n-------- TESTING EXTRACT COMBINED REPORT HEADER RETURN LIST FUNCTION --------\n")
-    # teset_combined_report_header_return_list()
+    print("\n-------- TESTING EXTRACT COMBINED REPORT HEADER RETURN LIST FUNCTION --------\n")
+    teset_combined_report_header_return_list()
 
     # print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE A FUNCTION --------\n")
     # test_service_component_table_template_a()
 
-    # print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE A FROM LIST FUNCTION --------\n")
-    # test_sc_table_template_a_from_list()
+    print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE A FROM LIST FUNCTION --------\n")
+    test_sc_table_template_a_from_list()
 
     # print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE B SINGLE PAGE FUNCTION --------\n")
     # test_service_component_table_template_b_single_page()
 
-    # print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE B FROM LIST FUNCTION --------\n")
-    # test_sc_table_template_b_from_list()
+    print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE B FROM LIST FUNCTION --------\n")
+    test_sc_table_template_b_from_list()
 
     print("-------- TESTING GLOSAS EXTRACTION FROM LIST FUNCTION --------\n")
     test_extract_glosas_section_from_list()
