@@ -425,6 +425,16 @@ class TableHelper:
         if df is None or df.empty:
             return df
 
+        # If Camelot already gave us exactly what we want, DO NOTHING.
+        if df.shape[1] == expected_cols:
+            return df
+        
+        if df.shape[1] < expected_cols:
+            return df  # can't invent columns safely
+
+        if df.shape[1] == expected_cols:
+            return df  # already correct
+
         tmp = df.copy()
 
         # Normalize whitespace first so empties can be detected reliably.
@@ -1860,171 +1870,243 @@ class TableHelper:
 
 
     def extract_service_component_table_template_b(
-        self,
-        pdf_path: str,
-        page: Union[int, str],
-        config: Dict[str, Any],
-    ) -> pd.DataFrame:
-        """
-        Extract a single 5-column Template B financial table from one PDF page.
+            self,
+            pdf_path: str,
+            page: Union[int, str],
+            config: Dict[str, Any],
+        ) -> pd.DataFrame:
+            """
+            Extract a single 5-column Template B financial table from one PDF page.
 
-        Template B is the "no USD" variant:
-            [sub_titulo, item_asig, denominaciones, glosa_no, moneda_nacional]
-        """
-        tmpl = config["service_component_table_areas"]["template_b_no_usd"]
+            Template B is the "no USD" variant:
+                [sub_titulo, item_asig, denominaciones, glosa_no, moneda_nacional]
+            """
+            # tmpl = config["service_component_table_areas"]["template_b_no_usd"]
+            tmpl_base = config["service_component_table_areas"]["template_b_no_usd"]
+            tmpl = dict(tmpl_base)  # shallow copy so we can safely override
 
-        page_height = float(tmpl["page_height"])
-        expected_cols = int(tmpl["expected_cols"])
-        if expected_cols != 5:
-            raise ValueError(
-                f"Template B expected_cols must be 5, got {expected_cols}."
-            )
+            overrides = tmpl_base.get("page_overrides") or {}
+            page_int = int(page)
+            page_key = str(page_int)
 
-        left, top, width, height = self._parse_csv_floats(
-            tmpl["table_area_preview"], expected_n=4
+            ov = None
+            if page_key in overrides:
+                ov = overrides.get(page_key)
+            elif page_int in overrides:
+                ov = overrides.get(page_int)
+            if ov:
+                ov = dict(ov)
+
+                if "table_area" in ov and "camelot_area" not in ov:
+                    tmpl["camelot_area"] = ov["table_area"]
+
+                # (Optional) still allow overriding the preview bbox explicitly
+                if "table_area_preview" in ov:
+                    tmpl["table_area_preview"] = ov["table_area_preview"]
+
+                # Preserve camelot_area if provided
+                if "camelot_area" in ov:
+                    tmpl["camelot_area"] = ov["camelot_area"]
+
+                if "columns" in ov:
+                    tmpl["columns"] = ov["columns"]
+
+            # DEBUG (run once)
+            # print(f"[TemplateB OVERRIDE] page={page} ov={ov} tmpl_camelot_area={tmpl.get('camelot_area')}")
+
+            page_height = float(tmpl["page_height"])
+            expected_cols = int(tmpl["expected_cols"])
+            if expected_cols != 5:
+                raise ValueError(
+                    f"Template B expected_cols must be 5, got {expected_cols}."
+                )
+
+            if tmpl.get("camelot_area"):
+                area_str = str(tmpl["camelot_area"]).strip()
+            else:
+                left, top, width, height = self._parse_csv_floats(
+                    tmpl["table_area_preview"], expected_n=4
+                )
+                area_str = self._preview_bbox_to_camelot_area(
+                    page_height=page_height,
+                    left=left,
+                    top=top,
+                    width=width,
+                    height=height,
         )
-        area_str = self._preview_bbox_to_camelot_area(
-            page_height=page_height,
-            left=left,
-            top=top,
-            width=width,
-            height=height,
-        )
 
-        # Keep extraction focused on financial rows if Glosas appears below.
-        area_str, _ = self._find_glosas_bbox_and_table_only_area(
-            pdf_path=pdf_path,
-            camelot_page=int(page),
-            base_table_area_str=area_str,
-            page_height=page_height,
-            x_min=0.0,
-            x_max=260.0,
-        )
-
-        def _best_table(tables):
-            return max(tables, key=lambda t: int(t.shape[0]) * int(t.shape[1]))
-
-        def _extract_from_area(area: str) -> pd.DataFrame:
-            # Re-apply glosas crop for every pass (including deeper rescue areas).
-            area, _ = self._find_glosas_bbox_and_table_only_area(
+            # Keep extraction focused on financial rows if Glosas appears below.
+            area_str, _ = self._find_glosas_bbox_and_table_only_area(
                 pdf_path=pdf_path,
                 camelot_page=int(page),
-                base_table_area_str=area,
+                base_table_area_str=area_str,
                 page_height=page_height,
                 x_min=0.0,
-                x_max=260.0,
+                x_max=1000, # was 260
             )
 
-            # Start with lattice (stable when ruling lines exist), then fallback to stream.
-            tables = camelot.read_pdf(
-                filepath=pdf_path,
-                pages=str(page),
-                flavor="lattice",
-                table_areas=[area],
-            )
+            def _best_table(tables):
+                return max(tables, key=lambda t: int(t.shape[0]) * int(t.shape[1]))
 
-            # Fallback to stream if lattice found nothing OR wrong shape.
-            lattice_df = _best_table(tables).df if tables.n > 0 else pd.DataFrame()
-            lattice_df = self._normalize_template_b_column_shape(
-                lattice_df, expected_cols=expected_cols
-            )
+            def _extract_from_area(area_str: str, columns_str: Optional[str] = None) -> pd.DataFrame:
+                """
+                PURPOSE:
+                    Extract a table from a given Camelot area string, optionally with column guides.
 
-            if tables.n == 0 or lattice_df.shape[1] != expected_cols:
+                NOTES:
+                    - Uses lattice first, then falls back to stream with optional column separators.
+                    - Performs validation + cleaning + standard column naming.
+                """
+                # Debug print
+                #print(f"[TemplateB _extract_from_area] columns_str incoming={columns_str!r}")
+
+                columns_arg = [str(columns_str)] if columns_str else None
+                
+                # Debug print
+                # print(f"[TemplateB CALL] page={page} area={area_str} columns_arg={columns_arg}")
+
+                # 1) Try lattice first (best when ruling lines exist)
                 tables = camelot.read_pdf(
                     filepath=pdf_path,
                     pages=str(page),
-                    flavor="stream",
-                    table_areas=[area],
-                    split_text=False,
+                    flavor="lattice",
+                    table_areas=[area_str],
                 )
 
-            if tables.n == 0:
-                raise RuntimeError(
-                    f"No tables found by Camelot on page={page} using area={area}."
-                )
+                lattice_df = _best_table(tables).df if getattr(tables, "n", 0) > 0 else pd.DataFrame()
+                lattice_df = self._normalize_template_b_column_shape(lattice_df, expected_cols=expected_cols)
+                # Debug Print
+                # print(f"[TemplateB lattice] n={getattr(tables,'n',0)} lattice_shape={lattice_df.shape}")
 
-            df_local = _best_table(tables).df
-            df_local = self._normalize_template_b_column_shape(df_local, expected_cols=expected_cols)
-            if df_local.shape[1] != expected_cols:
-                raise ValueError(
-                    f"Template B extraction failed validation: expected {expected_cols} columns, "
-                    f"got {df_local.shape[1]} (page={page}, area={area})."
-                )
+                # 2) Fallback to stream if lattice is empty OR wrong shape
+                if getattr(tables, "n", 0) == 0 or lattice_df.shape[1] != expected_cols:
+                    tables = camelot.read_pdf(
+                        pdf_path,
+                        pages=str(page),
+                        flavor="stream",
+                        table_areas=[area_str],
+                        columns=columns_arg,
+                    )
+                #Debug Print
+                # print(f"[TemplateB stream] n={getattr(tables,'n',0)} best_shape={_best_table(tables).df.shape if getattr(tables,'n',0)>0 else None}")
 
-            df_local.columns = [
-                "sub_titulo",
-                "item_asig",
-                "denominaciones",
-                "glosa_no",
-                "moneda_clp_miles",
-            ]
-            df_local = self._drop_leading_table_header_rows(
-                df_local, value_col="moneda_clp_miles"
+                if getattr(tables, "n", 0) == 0:
+                    raise RuntimeError(
+                        f"No tables found by Camelot on page={page} using area={area_str}."
+                    )
+
+                df_local = _best_table(tables).df
+
+                df_raw = _best_table(tables).df
+                # Debug Print
+                # print(f"[TemplateB RAW] page={page} raw_shape={df_raw.shape}")
+                # print(df_raw.head(2))
+
+                df_local = self._normalize_template_b_column_shape(df_raw, expected_cols=expected_cols)
+                # Debug Print
+                # print(f"[TemplateB NORM] page={page} norm_shape={df_local.shape}")
+                # print(df_local.head(2))
+
+                df_local = self._normalize_template_b_column_shape(df_local, expected_cols=expected_cols)
+
+                if df_local.shape[1] != expected_cols:
+                    raise ValueError(
+                        f"Template B extraction failed validation: expected {expected_cols} columns, "
+                        f"got {df_local.shape[1]} (page={page}, area={area_str})."
+                    )
+
+                # ---- Standardize columns + clean ----
+                df_local.columns = [
+                    "sub_titulo",
+                    "item_asig",
+                    "denominaciones",
+                    "glosa_no",
+                    "moneda_clp_miles",
+                ]
+                df_local = self._drop_leading_table_header_rows(df_local, value_col="moneda_clp_miles")
+                df_local = self._clean_service_component_table(df_local)
+
+                df_local.columns = [
+                    "sub_titulo",
+                    "item_asig",
+                    "denominaciones",
+                    "glosa_no",
+                    "moneda_nacional_miles_de_$CLP",
+                ]
+                df_local = self._post_process_extracted_table(df_local)
+                df_local = self._truncate_at_glosas_heading(df_local)
+                df_local = self._replace_nan_with_none(df_local)
+
+                return df_local
+
+            # df = _extract_from_area(area_str)
+            df = _extract_from_area(area_str, columns_str=tmpl.get("columns"))
+            # DEBUG
+            # print(f"[TemplateB] page={page} FINAL area_str={area_str} (camelot_area={tmpl.get('camelot_area')})")
+
+            def _tail_flags(df_: pd.DataFrame) -> dict:
+                """
+                PURPOSE:
+                    Inspect tail rows for footer/notes/glosas patterns.
+                    Must be robust to pre-standardized dataframes.
+                """
+                if df_ is None or df_.empty:
+                    return {"has_glosas": False, "has_total": False}
+
+                if "denominaciones" not in df_.columns:
+                    return {"has_glosas": False, "has_total": False, "missing_denominaciones": True}
+
+                d = df_["denominaciones"].fillna("").astype(str).str.casefold()
+                return {
+                    "has_glosas": d.str.contains("glosas").any(),
+                    "has_total": d.str.contains("total").any(),
+                    "has_iniciativas": d.str.contains("iniciativas de inversión", regex=False).any()
+                    or d.str.contains("iniciativas de inversion", regex=False).any(),
+                    "has_proyectos": d.str.contains("proyectos", regex=False).any(),
+                    "has_debt_header": d.str.contains("servicio de la deuda", regex=False).any(),
+                    "has_deuda_flotante": d.str.contains("deuda flotante", regex=False).any(),
+                }
+
+            def _tail_score(df_: pd.DataFrame) -> int:
+                flags = _tail_flags(df_)
+                score = 0
+                if flags["has_iniciativas"]:
+                    score += 2
+                if flags["has_proyectos"]:
+                    score += 4
+                if flags["has_debt_header"]:
+                    score += 4
+                if flags["has_deuda_flotante"]:
+                    score += 6
+                return score
+
+            flags0 = _tail_flags(df)
+            # Broaden trigger:
+            # If Deuda Flotante is missing, we likely have a truncated tail on Template B pages.
+            # Keep existing targeted checks as well.
+            needs_tail_rescue = (
+                (not flags0["has_deuda_flotante"])
+                or (flags0["has_iniciativas"] and not flags0["has_proyectos"])
+                or (flags0["has_debt_header"] and not flags0["has_deuda_flotante"])
             )
-            df_local = self._clean_service_component_table(df_local)
-            df_local.columns = [
-                "sub_titulo",
-                "item_asig",
-                "denominaciones",
-                "glosa_no",
-                "moneda_nacional_miles_de_$CLP",
-            ]
-            df_local = self._post_process_extracted_table(df_local)
-            df_local = self._truncate_at_glosas_heading(df_local)
-            return self._replace_nan_with_none(df_local)
 
-        df = _extract_from_area(area_str)
+            if needs_tail_rescue:
+                x1, y1, x2, y2 = self._parse_camelot_area(area_str)
+                candidates: list[pd.DataFrame] = [df]
 
-        # Tail rescue: some pages clip rows below "INICIATIVAS DE INVERSIÓN" and/or debt lines.
-        def _tail_flags(df_: pd.DataFrame) -> dict[str, bool]:
-            d = df_["denominaciones"].fillna("").astype(str).str.casefold()
-            return {
-                "has_iniciativas": d.str.contains("iniciativas de inversión", regex=False).any()
-                or d.str.contains("iniciativas de inversion", regex=False).any(),
-                "has_proyectos": d.str.contains("proyectos", regex=False).any(),
-                "has_debt_header": d.str.contains("servicio de la deuda", regex=False).any(),
-                "has_deuda_flotante": d.str.contains("deuda flotante", regex=False).any(),
-            }
+                for delta in (80.0, 140.0, 200.0, 260.0, 320.0):
+                    rescue_area = self._format_camelot_area(x1, max(0.0, y1 - delta), x2, y2)
+                    try:
+                        # df_rescue = _extract_from_area(rescue_area)
+                        df_rescue = _extract_from_area(rescue_area, columns_str=tmpl.get("columns"))
+                        candidates.append(df_rescue)
+                    except Exception:
+                        continue
 
-        def _tail_score(df_: pd.DataFrame) -> int:
-            flags = _tail_flags(df_)
-            score = 0
-            if flags["has_iniciativas"]:
-                score += 2
-            if flags["has_proyectos"]:
-                score += 4
-            if flags["has_debt_header"]:
-                score += 4
-            if flags["has_deuda_flotante"]:
-                score += 6
-            return score
+                # Prefer more complete tail markers first, then longer table.
+                df = max(candidates, key=lambda cand: (_tail_score(cand), len(cand)))
 
-        flags0 = _tail_flags(df)
-        # Broaden trigger:
-        # If Deuda Flotante is missing, we likely have a truncated tail on Template B pages.
-        # Keep existing targeted checks as well.
-        needs_tail_rescue = (
-            (not flags0["has_deuda_flotante"])
-            or (flags0["has_iniciativas"] and not flags0["has_proyectos"])
-            or (flags0["has_debt_header"] and not flags0["has_deuda_flotante"])
-        )
-
-        if needs_tail_rescue:
-            x1, y1, x2, y2 = self._parse_camelot_area(area_str)
-            candidates: list[pd.DataFrame] = [df]
-
-            for delta in (80.0, 140.0, 200.0, 260.0, 320.0):
-                rescue_area = self._format_camelot_area(x1, max(0.0, y1 - delta), x2, y2)
-                try:
-                    df_rescue = _extract_from_area(rescue_area)
-                    candidates.append(df_rescue)
-                except Exception:
-                    continue
-
-            # Prefer more complete tail markers first, then longer table.
-            df = max(candidates, key=lambda cand: (_tail_score(cand), len(cand)))
-
-        return df
+            return df
 
 
     def extract_service_component_tables_template_b_from_list(

@@ -64,10 +64,10 @@ def test_build_chile_logical_model():
     PDF_PATH = "data/chile_budget_2025.pdf"
     CFG_PATH = "config/chile_pdf.yaml"
     cfg = yaml.safe_load(Path(CFG_PATH).read_text())
-    # template_a_pages = [554, 559, 565,582]
-    # template_b_pages = [556,558,561,563,567,568,570,572,573,574,576,577,580,581]
-    template_a_pages = [554]
-    template_b_pages = [556]
+    template_a_pages = [554, 559, 565,582]
+    template_b_pages = [556,558,561,563,567,568,570,572,573,574,576,577,580,581,723]
+    # template_a_pages = [554]
+    # template_b_pages = [723]
     
     nb = build_chile_logical_model(
         pdf_path=PDF_PATH,
@@ -78,6 +78,10 @@ def test_build_chile_logical_model():
         template_b_pages=template_b_pages,
     )
 
+
+    # Summarize the model structure
+    summarize_model(nb)
+    
     # Minimal sanity prints
     print("Country:", nb.country)
     print("Ministries:", len(nb.ministries))
@@ -87,10 +91,10 @@ def test_build_chile_logical_model():
         first_min = next(iter(nb.ministries.values()))
         units = getattr(first_min, "units", {})
         print("Ministry:", first_min.ministry_name, "| Number of Units:", len(units))
-        print(f"Units: {list(units.keys())[:5]}")  # print first 5 unit names
+        print(f"Units: {list(units.keys())[:]}")  # print first 5 unit names
 
-    # Summarize the model structure
-    summarize_model(nb)
+    # # Summarize the model structure
+    # summarize_model(nb)
 
 
 def execute_tests()-> None:

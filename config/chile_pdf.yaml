@@ -15,6 +15,29 @@ service_component_table_areas:
     page_height: 751.19
     table_area_preview: "61.9,113.11,422.65,327.73"
     expected_cols: 5
+    # page_overrides:
+    #   "723":
+    #     # this one you were using (too big, includes paragraph) — keep it as fallback
+    #     table_area: "0,230,595,710"
+    #     columns: "85,150,365,505"
+
+    #     # NEW: candidate_areas (Camelot areas) focusing on the bottom continuation table
+    #     candidate_areas:
+    #       - "0,40,595,210"
+    #       - "0,40,595,240"
+    #       - "0,40,595,270"
+    #       - "15,40,580,240"
+    #       - "25,40,570,260"
+    page_overrides:
+      "723":
+        table_area: "0,230,595,710"
+        columns: "85,150,365,505"
+        disable_glosas_crop: true
+        candidate_areas:
+          - "0,40,595,210"
+          - "0,40,595,240"
+          - "0,40,595,270"
+          - "15,40,580,240"
 
 # Country-specific
 country: Chile

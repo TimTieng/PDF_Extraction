@@ -230,7 +230,7 @@ def test_sc_table_template_b_from_list():
     config = load_yaml(yaml_path)
     pdf_path = "data/chile_budget_2025.pdf"
     # pages = [556,558,561,563,567,568,570]
-    pages = [556,558,561,563,567,568,570,572,573,574,576,577,580,581]
+    pages = [556,558,561,563,567,568,570,572,573,574,576,577,580,581,723]
 
     helper = TableHelper()
 
@@ -279,7 +279,7 @@ def test_extract_glosas_section_from_list():
     pdf_path = "data/chile_budget_2025.pdf"
 
     # Pages the GLOSAS heading  appear (start pages)
-    pages = [555, 556, 558, 559, 561, 563,566,567,568, 570, 572, 573, 575,576, 577, 580, 581, 582]
+    pages = [555, 556, 558, 559, 561, 563,566,567,568, 570, 572, 573, 575,576, 577, 580, 581, 582,725]
 
     helper = TableHelper()
 
@@ -366,14 +366,14 @@ def execute_tests() -> None:
     # print("\n-------- TESTING EXTRACT SIDE REPORT HEADER RETURN LIST FUNCTION --------\n")
     # test_extract_side_report_header_return_list()
 
-    print("\n-------- TESTING EXTRACT COMBINED REPORT HEADER RETURN LIST FUNCTION --------\n")
-    teset_combined_report_header_return_list()
+    # print("\n-------- TESTING EXTRACT COMBINED REPORT HEADER RETURN LIST FUNCTION --------\n")
+    # teset_combined_report_header_return_list()
 
     # print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE A FUNCTION --------\n")
     # test_service_component_table_template_a()
 
-    print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE A FROM LIST FUNCTION --------\n")
-    test_sc_table_template_a_from_list()
+    # print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE A FROM LIST FUNCTION --------\n")
+    # test_sc_table_template_a_from_list()
 
     # print("-------- TESTING SERVICE COMPONENT TABLE TEMPLATE B SINGLE PAGE FUNCTION --------\n")
     # test_service_component_table_template_b_single_page()
