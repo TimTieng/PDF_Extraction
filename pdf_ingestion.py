@@ -437,7 +437,7 @@ def build_chile_logical_model(
         unit_name = _safe_str(main.get("service_component"), default=f"CAPITULO_{capitulo}")
         unit = _get_or_create_unit(ministry, name=unit_name, code=capitulo)
 
-        program = _get_or_create_program(unit, name=f"PROGRAMA_{programa}", code=programa)
+        program = _get_or_create_program(unit, name=f"sub_component{programa}", code=programa)
 
         subtitle = _get_or_create_subtitle(program, code=current_subtitle, name="")
 
