@@ -230,7 +230,7 @@ def test_sc_table_template_b_from_list():
     config = load_yaml(yaml_path)
     pdf_path = "data/chile_budget_2025.pdf"
     # pages = [556,558,561,563,567,568,570]
-    pages = [556,558,561,563,567,568,570,572,573,574,576,577,580,581,723]
+    pages = [556,558,561,563,567,568,570,572,573,574,576,577,580,581,724]
 
     helper = TableHelper()
 
