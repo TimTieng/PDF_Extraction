@@ -5,7 +5,15 @@ import yaml
 
 from pdf_ingestion import build_chile_logical_model
 
-logging.basicConfig(level=logging.INFO)
+# ---- Configure  debugging logging for test run ----
+logging.basicConfig(level=logging.DEBUG)
+
+logging.getLogger("pdfminer").setLevel(logging.WARNING)
+logging.getLogger("camelot").setLevel(logging.WARNING)      # optional
+logging.getLogger("pdfplumber").setLevel(logging.WARNING)   # optional
+
+log = logging.getLogger("pdf_ingestion")
+log.setLevel(logging.DEBUG)
 
 
 def summarize_model(nb):
@@ -65,7 +73,7 @@ def test_build_chile_logical_model():
     CFG_PATH = "config/chile_pdf.yaml"
     cfg = yaml.safe_load(Path(CFG_PATH).read_text())
     template_a_pages = [554, 559, 565,582]
-    template_b_pages = [556,558,561,563,567,568,570,572,573,574,576,577,580,581,723]
+    template_b_pages = [556,558,561,563,567,568,570,572,573,574,576,577,580,581,724]
     # template_a_pages = [554]
     # template_b_pages = [723]
     
@@ -85,6 +93,7 @@ def test_build_chile_logical_model():
     # Minimal sanity prints
     print("Country:", nb.country)
     print("Ministries:", len(nb.ministries))
+    print("Ministry Names:", list(nb.ministries.keys())[:5]) 
 
     # Optional: drill down one level if available
     if nb.ministries:

@@ -15,17 +15,20 @@ NOTES:
     - Camelot table pages are 1-based.
     - Header cache uses 0-based pages (page0 = source_page - 1).
 """
-
+# Standard Imports
 from __future__ import annotations
 
 import logging
+import math
+import pandas as pd
 from pdb import main
+import re
 import warnings
 from datetime import datetime
-from typing import Any, Dict, Optional, Tuple
 
-import pandas as pd
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
+# Custom/Special Imports
 import chile_budget_model as cbm
 from tablehelper import TableHelper
 
@@ -34,6 +37,357 @@ try:
     import pymupdf as _pymupdf  # type: ignore
 except Exception:  # pragma: no cover
     import fitz as _pymupdf  # type: ignore
+
+# -----------------------------------------------------------------------------
+# Row classification and parsing utilities functions to support ingestion
+# -----------------------------------------------------------------------------
+
+RowKind = Literal["SUBTITLE_ROLLUP", "ITEM_2", "SUBITEM_3", "TEXT_CONTINUATION", "UNKNOWN"]
+
+_ITEM_RE = re.compile(r"\d+")
+
+class ParsedItemAsig:
+    """
+    PURPOSE:
+        Lightweight container representing the parsed structure of an
+        'item_asig' cell from Template B tables.
+
+    DESCRIPTION:
+        The item_asig column may contain:
+            - A 2-digit parent code (e.g., "01")
+            - A 3-digit child code (e.g., "002")
+            - Both parent and child in a single cell (e.g., "01 002")
+            - Line-break separated values (e.g., "01\\n002")
+            - Blank or malformed text
+
+        This class stores the interpreted components in a normalized format.
+
+    ATTRIBUTES:
+        raw   : Original normalized string value of the cell.
+        item2 : Parsed 2-digit parent code (if present).
+        item3 : Parsed 3-digit child code (if present).
+
+    NOTES:
+        - Codes are extracted using digit detection only.
+        - This class does NOT enforce hierarchy rules.
+          It simply represents parsed structure.
+    """
+
+    def __init__(self, raw: str, item2: Optional[str] = None, item3: Optional[str] = None):
+        self.raw = raw
+        self.item2 = item2
+        self.item3 = item3
+
+    def __repr__(self) -> str:
+        """
+        PURPOSE:
+            Provide developer-friendly debugging output.
+
+        RETURNS:
+            String representation of parsed structure.
+        """
+        return f"ParsedItemAsig(raw={self.raw!r}, item2={self.item2!r}, item3={self.item3!r})"
+
+
+def _parse_item_asig(value: object) -> ParsedItemAsig:
+    """
+    PURPOSE:
+        Parse the raw 'item_asig' value into structured 2-digit and 3-digit components.
+
+    PARAMETERS:
+        value : Raw cell value from DataFrame.
+
+    RETURNS:
+        ParsedItemAsig instance containing:
+            - raw string
+            - item2 (2-digit parent code if present)
+            - item3 (3-digit child code if present)
+
+    BEHAVIOR:
+        - Extracts digit tokens using regex.
+        - Prefers explicit 2-digit and 3-digit tokens when both exist.
+        - If only one token exists:
+            - 2 digits → interpreted as parent
+            - 3 digits → interpreted as child
+
+    NOTES:
+        This function performs structural parsing only.
+        It does not determine semantic row type.
+    """
+    s = _norm_str(value) or ""
+    digits = _ITEM_RE.findall(s)
+
+    item2 = None
+    item3 = None
+
+    # Prefer explicit 2-digit and 3-digit tokens if present
+    for tok in digits:
+        if len(tok) == 2 and item2 is None:
+            item2 = tok
+        elif len(tok) == 3 and item3 is None:
+            item3 = tok
+
+    # If only one token exists, interpret by length
+    if len(digits) == 1:
+        tok = digits[0]
+        if len(tok) == 2:
+            item2 = item2 or tok
+        elif len(tok) == 3:
+            item3 = item3 or tok
+
+    return ParsedItemAsig(raw=s, item2=item2, item3=item3)
+
+
+def _classify_row(
+    st_code: Optional[str],
+    parsed: ParsedItemAsig,
+    denom: str,
+    amt_clp: Optional[float],
+    amt_usd: Optional[float],
+    current_subtitle: Optional[str] = None,
+) -> RowKind:
+    """
+    PURPOSE:
+        Classify a financial table row into a structural hierarchy type.
+    """
+    has_amt = (amt_clp is not None) or (amt_usd is not None)
+    has_denom = bool((denom or "").strip())
+    denom_norm = (denom or "").strip()
+
+    # Treat NaN as missing (see section 2)
+    # (Assumes _norm_float handles NaN; if not, keep has_amt but amounts may be None.)
+
+    # 1) Subtitle roll-up row (explicit subtitle code present)
+    if st_code and (parsed.item2 is None and parsed.item3 is None) and has_denom:
+        return "SUBTITLE_ROLLUP"
+
+    # 1b) Subtitle roll-up row (implicit: subtitle context exists, but PDF shows blank sub_titulo cell)
+    if (
+        not st_code
+        and current_subtitle
+        and (parsed.item2 is None and parsed.item3 is None)
+        and has_denom
+        and denom_norm.upper() in {"INGRESOS", "GASTOS"}
+        and has_amt
+    ):
+        return "SUBTITLE_ROLLUP"
+
+    if parsed.item2 and not parsed.item3:
+        return "ITEM_2"
+
+    if parsed.item3:
+        return "SUBITEM_3"
+
+    if has_denom or has_amt:
+        return "TEXT_CONTINUATION"
+
+    return "UNKNOWN"
+
+
+def _log_row_debug(
+    log: logging.Logger,
+    kind: str,
+    row: pd.Series,
+    st_code: Optional[str],
+    parsed: Optional[object],  # allow None until classifier is wired
+    denom: str,
+    amt_clp: Optional[float],
+    amt_usd: Optional[float],
+    ctx: Dict[str, str],
+    every_n: int = 200,
+    i: int = 0,
+    raw_sub_titulo=None,
+    raw_item_asig=None,
+    subtitle_updated=False,
+    item_updated=False,
+) -> None:
+    """
+    PURPOSE:
+        Emit structured debug logs for row classification + mapping context.
+
+    PARAMETERS:
+        log     : Logger.
+        kind    : Row classification label (string).
+        row     : DataFrame row.
+        st_code : Row subtitle code (if present).
+        parsed  : ParsedItemAsig (or None until classifier is wired).
+        denom   : Denominaciones text.
+        amt_clp : Parsed CLP amount.
+        amt_usd : Parsed USD amount.
+        ctx     : Context dictionary (ministry/unit/program/etc).
+        every_n : Emit logs for every N rows (sampling).
+        i       : Row counter used for sampling.
+
+    RETURNS:
+        None.
+
+    NOTES:
+        - Safe when parsed is None.
+        - Only logs when logger level is DEBUG.
+    """
+    if every_n and i % every_n != 0:
+        return
+
+    item2 = parsed.get("item2") if isinstance(parsed, dict) else None
+    item3 = parsed.get("item3") if isinstance(parsed, dict) else None
+    page = row.get("source_page")
+
+    log.debug(
+        "ROW kind=%s page=%s st=%s item2=%s item3=%s upd_st=%s upd_item=%s "
+        "amt_clp=%s amt_usd=%s denom=%r ctx=%s raw_st=%r raw_item_asig=%r",
+        kind, page, st_code, item2, item3, subtitle_updated, item_updated,
+        amt_clp, amt_usd, denom, ctx, raw_sub_titulo, raw_item_asig
+    )
+
+
+def _is_close(a: Optional[float], b: Optional[float], tol: float = 0.5) -> bool:
+    """
+    PURPOSE:
+        Compare two numeric values with tolerance, handling None safely.
+
+    NOTES:
+        tol defaults to 0.5 since your numbers are in 'miles' (thousands) and
+        rounding differences can occur in PDFs.
+    """
+    if a is None or b is None:
+        return True
+    return math.isclose(float(a), float(b), abs_tol=tol)
+
+
+def _validate_rollups(
+    nb: "cbm.NationalBudget",
+    log: logging.Logger,
+    tol: float = 0.5,
+) -> List[Dict[str, Any]]:
+    """
+    PURPOSE:
+        Validate roll-up integrity:
+            - Subtitle total vs sum(Item totals)
+            - Item total vs sum(Subitem amounts)
+
+    RETURNS:
+        List of anomaly records (dicts) for debugging/QA.
+
+    BEHAVIOR:
+        - Skips comparisons when either side is missing (None).
+        - Uses tolerance to allow for rounding differences.
+    """
+    anomalies: List[Dict[str, Any]] = []
+
+    for m_key, ministry in (nb.ministries or {}).items():
+        for u_key, unit in (getattr(ministry, "units", {}) or {}).items():
+            for p_key, program in (getattr(unit, "programs", {}) or {}).items():
+
+                # Program has income_subtitles / expense_subtitles in your model
+                subtitle_maps = []
+                if hasattr(program, "income_subtitles"):
+                    subtitle_maps.append(("income", program.income_subtitles))
+                if hasattr(program, "expense_subtitles"):
+                    subtitle_maps.append(("expense", program.expense_subtitles))
+
+                for bucket, subtitles in subtitle_maps:
+                    for st_code, subtitle in (subtitles or {}).items():
+
+                        # ---- Subtitle total vs sum(Item totals) ----
+                        items = getattr(subtitle, "items", {}) or {}
+                        sum_items_clp = None
+                        sum_items_usd = None
+
+                        # compute sums only if we have at least one numeric value
+                        vals_clp = [getattr(it, "total_amount_pesos", None) for it in items.values()]
+                        vals_usd = [getattr(it, "total_amount_usd", None) for it in items.values()]
+
+                        if any(v is not None for v in vals_clp):
+                            sum_items_clp = sum(v for v in vals_clp if v is not None)
+                        if any(v is not None for v in vals_usd):
+                            sum_items_usd = sum(v for v in vals_usd if v is not None)
+
+                        st_clp = getattr(subtitle, "total_amount_pesos", None)
+                        st_usd = getattr(subtitle, "total_amount_usd", None)
+
+                        if sum_items_clp is not None and st_clp is not None and not _is_close(st_clp, sum_items_clp, tol=tol):
+                            anomalies.append(
+                                {
+                                    "level": "subtitle",
+                                    "bucket": bucket,
+                                    "ministry": m_key,
+                                    "unit": u_key,
+                                    "program": p_key,
+                                    "subtitle_code": st_code,
+                                    "reported_clp": st_clp,
+                                    "computed_clp": sum_items_clp,
+                                }
+                            )
+
+                        if sum_items_usd is not None and st_usd is not None and not _is_close(st_usd, sum_items_usd, tol=tol):
+                            anomalies.append(
+                                {
+                                    "level": "subtitle",
+                                    "bucket": bucket,
+                                    "ministry": m_key,
+                                    "unit": u_key,
+                                    "program": p_key,
+                                    "subtitle_code": st_code,
+                                    "reported_usd": st_usd,
+                                    "computed_usd": sum_items_usd,
+                                }
+                            )
+
+                        # ---- Item total vs sum(Subitem amounts) ----
+                        for item_code, item in items.items():
+                            subs = getattr(item, "subitems", {}) or {}
+                            sub_vals_clp = [getattr(s, "amount_pesos", None) for s in subs.values()]
+                            sub_vals_usd = [getattr(s, "amount_usd", None) for s in subs.values()]
+
+                            item_clp = getattr(item, "total_amount_pesos", None)
+                            item_usd = getattr(item, "total_amount_usd", None)
+
+                            sum_sub_clp = None
+                            sum_sub_usd = None
+                            if any(v is not None for v in sub_vals_clp):
+                                sum_sub_clp = sum(v for v in sub_vals_clp if v is not None)
+                            if any(v is not None for v in sub_vals_usd):
+                                sum_sub_usd = sum(v for v in sub_vals_usd if v is not None)
+
+                            if sum_sub_clp is not None and item_clp is not None and not _is_close(item_clp, sum_sub_clp, tol=tol):
+                                anomalies.append(
+                                    {
+                                        "level": "item",
+                                        "bucket": bucket,
+                                        "ministry": m_key,
+                                        "unit": u_key,
+                                        "program": p_key,
+                                        "subtitle_code": st_code,
+                                        "item_code": item_code,
+                                        "reported_clp": item_clp,
+                                        "computed_clp": sum_sub_clp,
+                                    }
+                                )
+
+                            if sum_sub_usd is not None and item_usd is not None and not _is_close(item_usd, sum_sub_usd, tol=tol):
+                                anomalies.append(
+                                    {
+                                        "level": "item",
+                                        "bucket": bucket,
+                                        "ministry": m_key,
+                                        "unit": u_key,
+                                        "program": p_key,
+                                        "subtitle_code": st_code,
+                                        "item_code": item_code,
+                                        "reported_usd": item_usd,
+                                        "computed_usd": sum_sub_usd,
+                                    }
+                                )
+
+    if anomalies:
+        log.warning("Roll-up validation found %d anomalies (tol=%s).", len(anomalies), tol)
+        # Print first few to keep logs readable
+        for a in anomalies[:10]:
+            log.warning("ANOMALY: %s", a)
+    else:
+        log.info("Roll-up validation passed (no anomalies; tol=%s).", tol)
+
+    return anomalies
 
 
 # -----------------------------------------------------------------------------
@@ -84,19 +438,28 @@ def _norm_float(value: Any) -> Optional[float]:
     """
     PURPOSE:
         Convert a value into a float safely (handles Chilean separators).
-
-    RETURNS:
-        Float, or None if not parseable.
+        Returns None for blanks and NaN.
     """
+    if value is None:
+        return None
+
+    # handle pandas NaN / float('nan')
+    try:
+        if isinstance(value, float) and math.isnan(value):
+            return None
+    except Exception:
+        pass
+
     s = _norm_str(value)
     if not s:
         return None
 
-    # Chile number formatting often uses '.' for thousands, ',' for decimals
     s = s.replace(".", "").replace(",", ".")
-
     try:
-        return float(s)
+        f = float(s)
+        if math.isnan(f):
+            return None
+        return f
     except ValueError:
         return None
 
@@ -141,7 +504,6 @@ def _extract_creation_date_from_pymupdf_metadata(metadata: Dict[str, Any]) -> Op
             continue
 
     return None
-
 
 # -----------------------------------------------------------------------------
 # Model get-or-create helpers
@@ -390,35 +752,47 @@ def build_chile_logical_model(
     # ---- Build header cache once ----
     headers_by_page0 = _build_headers_by_page0(th, pdf_path, config, df_all, log)
 
-    print("\n--- SAMPLE HEADER ---")
-    if headers_by_page0:
-        k = next(iter(headers_by_page0))
-        print(headers_by_page0[k])
-    print("---------------------\n")
+    # print("\n--- SAMPLE HEADER ---")
+    # if headers_by_page0:
+    #     k = next(iter(headers_by_page0))
+    #     print(headers_by_page0[k])
+    # print("---------------------\n")
 
 
     # ---- Map rows into logical model ----
     current_subtitle: Optional[str] = None
     current_item: Optional[str] = None
 
+    # ---- DEBUG row counter (used for sampled debug logging) ----
+    row_i = 0
+
     for _, row in df_all.iterrows():
         st_code = _norm_int_str(row.get("sub_titulo"))
-        item_code = _norm_int_str(row.get("item_asig"))
-        denom = _safe_str(row.get("denominaciones"), default="")
+        denom = _safe_str(row.get("denominaciones"), default="").strip()
 
         amt_clp = _norm_float(row.get("moneda_nacional_miles_de_$CLP"))
         amt_usd = _norm_float(row.get("moneda_ext_convertida_miles_USD"))
 
-        # rolling hierarchy from table values
+        parsed = _parse_item_asig(row.get("item_asig"))
+
+        # ---- 1) update rolling subtitle context FIRST ----
         if st_code:
             current_subtitle = st_code
-            current_item = None
+            current_item = None  # reset item context on subtitle change
 
-        if item_code:
-            current_item = item_code
+        # ---- 2) classify row USING current_subtitle context ----
+        kind = _classify_row(
+            st_code=st_code,
+            parsed=parsed,
+            denom=denom,
+            amt_clp=amt_clp,
+            amt_usd=amt_usd,
+            current_subtitle=current_subtitle,
+        )
 
-        if not current_subtitle:
-            continue
+        # ---- 3) update rolling item context ----
+        if parsed.item2:
+            current_item = parsed.item2
 
         # ---- Header-driven hierarchy (fallback to TEMP if headers missing) ----
         src_page_1 = row.get("source_page")
@@ -432,6 +806,52 @@ def build_chile_logical_model(
         partida = _safe_str(side.get("partida") if isinstance(side, dict) else None, default="000")
         capitulo = _safe_str(side.get("capitulo") if isinstance(side, dict) else None, default="000")
         programa = _safe_str(side.get("programa") if isinstance(side, dict) else None, default="000")
+
+        # ---- DEBUG: log row classification + context (sampled) ----
+        # Note: if you haven't implemented _parse_item_asig/_classify_row yet,
+        # you can temporarily log using item_code and st_code only.
+        ctx = {
+            "ministry": ministry_name,
+            "partida": partida,
+            "capitulo": capitulo,
+            "programa": programa,
+            "current_subtitle": current_subtitle,
+            "current_item": current_item,
+        }
+
+        # TEMP debug classification (works with your existing variables)
+        # When you add row-classifier later, replace this with:
+        # parsed = _parse_item_asig(row.get("item_asig"))
+        # kind = _classify_row(st_code, parsed, denom, amt_clp, amt_usd)
+        parsed = _parse_item_asig(row.get("item_asig"))
+        kind = _classify_row(st_code, parsed, denom, amt_clp, amt_usd)
+
+        # DEBUG HELPERS for actionable print statemetns:
+        raw_st = row.get("sub_titulo")
+        raw_item = row.get("item_asig")
+
+        subtitle_updated = bool(st_code)          # row had a new subtitle code
+        item_updated = bool(parsed.item2)            # row had a new item code
+
+        _log_row_debug(
+            log=log,
+            kind=kind,
+            row=row,
+            st_code=st_code,
+            parsed=parsed,          # placeholder until classifier is wired
+            denom=denom,
+            amt_clp=amt_clp,
+            amt_usd=amt_usd,
+            ctx=ctx,
+            every_n=200,
+            i=row_i,
+            raw_sub_titulo=raw_st,
+            raw_item_asig=raw_item,
+            subtitle_updated=subtitle_updated,
+            item_updated=item_updated,
+        )
+
+        row_i += 1
 
         ministry = _get_or_create_ministry(nb, ministry_name, partida)
         unit_name = _safe_str(main.get("service_component"), default=f"CAPITULO_{capitulo}")
