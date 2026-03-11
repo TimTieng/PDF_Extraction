@@ -1,3 +1,4 @@
+from collections import Counter
 import logging
 from pathlib import Path
 import time
@@ -72,10 +73,10 @@ def test_build_chile_logical_model():
     PDF_PATH = "data/chile_budget_2025.pdf"
     CFG_PATH = "config/chile_pdf.yaml"
     cfg = yaml.safe_load(Path(CFG_PATH).read_text())
-    template_a_pages = [554, 559, 565,582]
-    template_b_pages = [556,558,561,563,567,568,570,572,573,574,576,577,580,581,724]
-    # template_a_pages = [554]
-    # template_b_pages = [723]
+    # template_a_pages = [554, 559, 565,582]
+    # template_b_pages = [556,558,561,563,567,568,570,572,573,574,576,577,580,581,724]
+    template_a_pages = [554]
+    template_b_pages = [561,572,581,724]
     
     nb = build_chile_logical_model(
         pdf_path=PDF_PATH,

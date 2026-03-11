@@ -20,12 +20,13 @@ from __future__ import annotations
 
 import logging
 import math
+from camelot import logger
 import pandas as pd
 from pdb import main
 import re
 import warnings
+from collections import Counter
 from datetime import datetime
-
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
 # Custom/Special Imports
@@ -37,6 +38,246 @@ try:
     import pymupdf as _pymupdf  # type: ignore
 except Exception:  # pragma: no cover
     import fitz as _pymupdf  # type: ignore
+
+
+# CANONICAL BUDGET ROW STRUCTURE:
+# For mapping rows into the logical model, we define a canonical structure that captures the key parsed components of a row. 
+# This allows the classification and mapping logic to work with a consistent interface.
+
+class CanonicalBudgetRow:
+    """
+    PURPOSE:
+        Stores one normalized financial row extracted from a Chile budget PDF
+        before the row is mapped into the logical model.
+
+    NOTES:
+        - This class is the canonical handoff object between extraction logic
+          and logical-model population.
+        - It stores both normalized values and raw extracted values so parsing
+          issues can be debugged without re-opening the PDF.
+        - This class should remain lightweight and data-oriented.
+
+    PARAMETERS:
+        source_pdf:
+            Name or path of the source PDF.
+        source_page_1based:
+            Human-readable PDF page number (1-based).
+        source_page_0based:
+            Zero-based page index if needed by extraction tooling.
+        source_schema:
+            Extraction schema/template used, such as TEMPLATE_A or TEMPLATE_B.
+        source_row_index:
+            Row index from the extracted DataFrame or normalized row stream.
+        row_kind:
+            Normalized row classification, such as SECTION_HEADER,
+            SUBTITLE_ROLLUP, ITEM_2, SUBITEM_3, TEXT_CONTINUATION, or UNKNOWN.
+        bucket:
+            Financial section such as INGRESOS, GASTOS, or UNKNOWN.
+        ministry_name:
+            Normalized ministry name from report header.
+        ministry_code:
+            Optional ministry code if available.
+        unit_name:
+            Normalized unit/service name from report header.
+        unit_code:
+            Optional unit code if available.
+        program_name:
+            Normalized program name from side header/report context.
+        program_code:
+            Optional program code if available.
+        service_component:
+            Optional top-level service component label.
+        sub_component:
+            Optional sub-component label.
+        subtitle_code:
+            Subtitle code from the financial hierarchy.
+        subtitle_name:
+            Subtitle description/name.
+        item_code:
+            Two-digit item code.
+        item_name:
+            Item description/name.
+        subitem_code:
+            Three-digit subitem/asignacion code.
+        subitem_name:
+            Subitem description/name.
+        denominaciones:
+            Primary normalized descriptive text for the row.
+        glosa_reference_numbers:
+            List of glosa note numbers referenced by this row.
+        amount_clp_thousands:
+            Normalized CLP amount in thousands.
+        amount_usd_thousands:
+            Normalized USD amount in thousands when present.
+        is_text_continuation:
+            Whether the row is a continuation of a previous row's text.
+        continuation_target:
+            Optional target level for continuation text, such as subtitle,
+            item, or subitem.
+        raw_sub_titulo:
+            Raw extracted subtitle column value.
+        raw_item_asig:
+            Raw extracted item/asignacion column value.
+        raw_denominaciones:
+            Raw extracted denominaciones value.
+        raw_glosa_no:
+            Raw extracted glosa number field.
+        raw_amount_clp:
+            Raw extracted CLP amount text.
+        raw_amount_usd:
+            Raw extracted USD amount text.
+        parser_notes:
+            List of debug or parser notes collected during normalization.
+        is_valid:
+            Whether the row passed basic validation checks.
+    """
+
+    def __init__(
+        self,
+        source_pdf: str,
+        source_page_1based: int,
+        source_page_0based: int = None,
+        source_schema: str = "UNKNOWN",
+        source_row_index: int = None,
+        row_kind: str = "UNKNOWN",
+        bucket: str = "UNKNOWN",
+        ministry_name: str = None,
+        ministry_code: str = None,
+        unit_name: str = None,
+        unit_code: str = None,
+        program_name: str = None,
+        program_code: str = None,
+        service_component: str = None,
+        sub_component: str = None,
+        subtitle_code: str = None,
+        subtitle_name: str = None,
+        item_code: str = None,
+        item_name: str = None,
+        subitem_code: str = None,
+        subitem_name: str = None,
+        denominaciones: str = None,
+        glosa_reference_numbers: list[str] = None,
+        amount_clp_thousands: float = None,
+        amount_usd_thousands: float = None,
+        is_text_continuation: bool = False,
+        continuation_target: str = None,
+        raw_sub_titulo: str = None,
+        raw_item_asig: str = None,
+        raw_denominaciones: str = None,
+        raw_glosa_no: str = None,
+        raw_amount_clp: str = None,
+        raw_amount_usd: str = None,
+        parser_notes: list[str] = None,
+        is_valid: bool = True,
+    ):
+        self.source_pdf = source_pdf
+        self.source_page_1based = source_page_1based
+        self.source_page_0based = source_page_0based
+        self.source_schema = source_schema
+        self.source_row_index = source_row_index
+
+        self.row_kind = row_kind
+        self.bucket = bucket
+
+        self.ministry_name = ministry_name
+        self.ministry_code = ministry_code
+        self.unit_name = unit_name
+        self.unit_code = unit_code
+        self.program_name = program_name
+        self.program_code = program_code
+        self.service_component = service_component
+        self.sub_component = sub_component
+
+        self.subtitle_code = subtitle_code
+        self.subtitle_name = subtitle_name
+        self.item_code = item_code
+        self.item_name = item_name
+        self.subitem_code = subitem_code
+        self.subitem_name = subitem_name
+
+        self.denominaciones = denominaciones
+        self.glosa_reference_numbers = glosa_reference_numbers or []
+
+        self.amount_clp_thousands = amount_clp_thousands
+        self.amount_usd_thousands = amount_usd_thousands
+
+        self.is_text_continuation = is_text_continuation
+        self.continuation_target = continuation_target
+
+        self.raw_sub_titulo = raw_sub_titulo
+        self.raw_item_asig = raw_item_asig
+        self.raw_denominaciones = raw_denominaciones
+        self.raw_glosa_no = raw_glosa_no
+        self.raw_amount_clp = raw_amount_clp
+        self.raw_amount_usd = raw_amount_usd
+
+        self.parser_notes = parser_notes or []
+        self.is_valid = is_valid
+
+    def to_dict(self) -> dict:
+        """
+        PURPOSE:
+            Converts this canonical row into a standard dictionary for
+            DataFrame creation, logging, export, or debugging.
+
+        RETURNS:
+            dict:
+                Dictionary representation of this canonical row.
+        """
+        return {
+            "source_pdf": self.source_pdf,
+            "source_page_1based": self.source_page_1based,
+            "source_page_0based": self.source_page_0based,
+            "source_schema": self.source_schema,
+            "source_row_index": self.source_row_index,
+            "row_kind": self.row_kind,
+            "bucket": self.bucket,
+            "ministry_name": self.ministry_name,
+            "ministry_code": self.ministry_code,
+            "unit_name": self.unit_name,
+            "unit_code": self.unit_code,
+            "program_name": self.program_name,
+            "program_code": self.program_code,
+            "service_component": self.service_component,
+            "sub_component": self.sub_component,
+            "subtitle_code": self.subtitle_code,
+            "subtitle_name": self.subtitle_name,
+            "item_code": self.item_code,
+            "item_name": self.item_name,
+            "subitem_code": self.subitem_code,
+            "subitem_name": self.subitem_name,
+            "denominaciones": self.denominaciones,
+            "glosa_reference_numbers": self.glosa_reference_numbers,
+            "amount_clp_thousands": self.amount_clp_thousands,
+            "amount_usd_thousands": self.amount_usd_thousands,
+            "is_text_continuation": self.is_text_continuation,
+            "continuation_target": self.continuation_target,
+            "raw_sub_titulo": self.raw_sub_titulo,
+            "raw_item_asig": self.raw_item_asig,
+            "raw_denominaciones": self.raw_denominaciones,
+            "raw_glosa_no": self.raw_glosa_no,
+            "raw_amount_clp": self.raw_amount_clp,
+            "raw_amount_usd": self.raw_amount_usd,
+            "parser_notes": self.parser_notes,
+            "is_valid": self.is_valid,
+        }
+
+    def __repr__(self) -> str:
+        """
+        PURPOSE:
+            Returns a concise debug representation of the canonical row.
+        """
+        return (
+            "CanonicalBudgetRow("
+            f"page={self.source_page_1based}, "
+            f"schema={self.source_schema}, "
+            f"row_kind={self.row_kind}, "
+            f"subtitle_code={self.subtitle_code}, "
+            f"item_code={self.item_code}, "
+            f"subitem_code={self.subitem_code}, "
+            f"amount_clp_thousands={self.amount_clp_thousands}, "
+            f"is_valid={self.is_valid})"
+        )
 
 # -----------------------------------------------------------------------------
 # Row classification and parsing utilities functions to support ingestion
@@ -154,14 +395,21 @@ def _classify_row(
     has_denom = bool((denom or "").strip())
     denom_norm = (denom or "").strip()
 
-    # Treat NaN as missing (see section 2)
-    # (Assumes _norm_float handles NaN; if not, keep has_amt but amounts may be None.)
-
     # 1) Subtitle roll-up row (explicit subtitle code present)
     if st_code and (parsed.item2 is None and parsed.item3 is None) and has_denom:
         return "SUBTITLE_ROLLUP"
 
-    # 1b) Subtitle roll-up row (implicit: subtitle context exists, but PDF shows blank sub_titulo cell)
+    # 1a) Program section header / roll-up (INGRESOS / GASTOS)
+    if (
+        not st_code
+        and (parsed.item2 is None and parsed.item3 is None)
+        and has_denom
+        and denom_norm.upper() in {"INGRESOS", "GASTOS"}
+        and has_amt
+    ):
+        return "SECTION_HEADER"
+
+    # 1b) Subtitle roll-up row (implicit via carry-forward context)
     if (
         not st_code
         and current_subtitle
@@ -172,12 +420,15 @@ def _classify_row(
     ):
         return "SUBTITLE_ROLLUP"
 
-    if parsed.item2 and not parsed.item3:
+    # 2) Parent item (2-digit level)
+    if parsed.item2 and not parsed.item3 and (has_denom or has_amt):
         return "ITEM_2"
 
-    if parsed.item3:
+    # 3) Child item (3-digit level)
+    if parsed.item3 and (has_denom or has_amt):
         return "SUBITEM_3"
 
+    # 4) Continuation text (wrapped rows)
     if has_denom or has_amt:
         return "TEXT_CONTINUATION"
 
@@ -678,6 +929,193 @@ def _build_headers_by_page0(
             return {}
 
 
+# CANONICAL BUDGET ROW HELPER FUNCTIONS
+def _build_canonical_budget_row(
+    row: pd.Series,
+    *,
+    pdf_path: str,
+    headers_by_page0: Dict[int, Dict[str, Any]],
+    row_index: int,
+    current_subtitle: Optional[str] = None,
+) -> CanonicalBudgetRow:
+    """
+    PURPOSE:
+        Convert one extracted pandas row into a CanonicalBudgetRow object.
+
+    PARAMETERS:
+        row:
+            One row from the combined extracted financial DataFrame.
+        pdf_path:
+            Path to the source PDF. Stored for provenance.
+        headers_by_page0:
+            Header cache keyed by 0-based page number.
+        row_index:
+            Row index from the combined extracted DataFrame.
+        current_subtitle:
+            Rolling subtitle context used by row classification logic.
+
+    RETURNS:
+        CanonicalBudgetRow:
+            Normalized canonical intermediate row object.
+    """
+
+    # ---- Source provenance ----
+    src_page_1 = row.get("source_page")
+    page0 = int(src_page_1) - 1 if src_page_1 is not None else None
+
+    # ---- Header context ----
+    hdr = headers_by_page0.get(page0, {}) if page0 is not None else {}
+    main = (hdr.get("main_header") or {}) if isinstance(hdr, dict) else {}
+    side = (hdr.get("side_header") or {}) if isinstance(hdr, dict) else {}
+
+    ministry_name = _safe_str(
+        main.get("ministry") if isinstance(main, dict) else None,
+        default="TEMP_MINISTRY",
+    )
+
+    # Side-header fields currently available in your pipeline
+    partida = _safe_str(
+        side.get("partida") if isinstance(side, dict) else None,
+        default="000",
+    )
+    capitulo = _safe_str(
+        side.get("capitulo") if isinstance(side, dict) else None,
+        default="000",
+    )
+    programa = _safe_str(
+        side.get("programa") if isinstance(side, dict) else None,
+        default="000",
+    )
+
+    service_component = _safe_str(
+    main.get("service_component") if isinstance(main, dict) else None,
+    default=None,
+    )
+
+    sub_component = _safe_str(
+        main.get("sub_component") if isinstance(main, dict) else None,
+        default=None,
+    )
+
+    # ---- Raw extracted values ----
+    raw_sub_titulo = row.get("sub_titulo")
+    raw_item_asig = row.get("item_asig")
+    raw_denominaciones = row.get("denominaciones")
+    raw_glosa_no = row.get("glosa_no")
+    raw_amount_clp = row.get("moneda_nacional_miles_de_$CLP")
+    raw_amount_usd = row.get("moneda_ext_convertida_miles_USD")
+
+    # ---- Normalized values ----
+    st_code = _norm_int_str(raw_sub_titulo)
+    denom = _safe_str(raw_denominaciones, default="").strip()
+
+    amt_clp = _norm_float(raw_amount_clp)
+    amt_usd = _norm_float(raw_amount_usd)
+
+    parsed = _parse_item_asig(raw_item_asig)
+
+    # ---- Classification ----
+    kind = _classify_row(
+        st_code=st_code,
+        parsed=parsed,
+        denom=denom,
+        amt_clp=amt_clp,
+        amt_usd=amt_usd,
+        current_subtitle=current_subtitle,
+    )
+
+    # ---- Bucket / section inference ----
+    bucket = "UNKNOWN"
+    denom_upper = denom.upper()
+    if denom_upper == "INGRESOS":
+        bucket = "INGRESOS"
+    elif denom_upper == "GASTOS":
+        bucket = "GASTOS"
+
+    # ---- Continuation inference ----
+    is_text_continuation = (kind == "TEXT_CONTINUATION")
+    continuation_target = None
+    if is_text_continuation:
+        if parsed.item3:
+            continuation_target = "subitem"
+        elif parsed.item2:
+            continuation_target = "item"
+        elif current_subtitle:
+            continuation_target = "subtitle"
+
+    # ---- Glosa note references (keep simple for v1) ----
+    glosa_reference_numbers: list[str] = []
+    glosa_raw = _safe_str(raw_glosa_no, default="")
+    if glosa_raw:
+        glosa_reference_numbers = re.findall(r"\d+", glosa_raw)
+
+    # ---- Map parsed hierarchy fields ----
+    subtitle_code = st_code
+    subtitle_name = denom if kind == "SUBTITLE_ROLLUP" else None
+
+    item_code = parsed.item2
+    item_name = denom if kind == "ITEM_2" else None
+
+    subitem_code = parsed.item3
+    subitem_name = denom if kind == "SUBITEM_3" else None
+
+    # ---- Validation / parser notes ----
+    parser_notes: list[str] = []
+    is_valid = True
+
+    has_denom = bool(denom)
+    has_amt = (amt_clp is not None) or (amt_usd is not None)
+    has_code = bool(st_code) or bool(parsed.item2) or bool(parsed.item3)
+
+    if not has_denom and not has_amt and not has_code:
+        parser_notes.append("blank_row")
+        is_valid = False
+
+    if kind == "UNKNOWN":
+        parser_notes.append("unknown_row_kind")
+
+    if kind == "TEXT_CONTINUATION":
+        parser_notes.append("text_continuation_row")
+
+    return CanonicalBudgetRow(
+        source_pdf=pdf_path,
+        source_page_1based=int(src_page_1) if src_page_1 is not None else None,
+        source_page_0based=page0,
+        source_schema="UNKNOWN",  # keep simple for v1; improve later
+        source_row_index=row_index,
+        row_kind=kind,
+        bucket=bucket,
+        ministry_name=ministry_name,
+        ministry_code=partida,
+        unit_name=None,
+        unit_code=capitulo,
+        program_name=None,
+        program_code=programa,
+        service_component=service_component,
+        sub_component=sub_component,
+        subtitle_code=subtitle_code,
+        subtitle_name=subtitle_name,
+        item_code=item_code,
+        item_name=item_name,
+        subitem_code=subitem_code,
+        subitem_name=subitem_name,
+        denominaciones=denom,
+        glosa_reference_numbers=glosa_reference_numbers,
+        amount_clp_thousands=amt_clp,
+        amount_usd_thousands=amt_usd,
+        is_text_continuation=is_text_continuation,
+        continuation_target=continuation_target,
+        raw_sub_titulo=_safe_str(raw_sub_titulo, default=None),
+        raw_item_asig=_safe_str(raw_item_asig, default=None),
+        raw_denominaciones=_safe_str(raw_denominaciones, default=None),
+        raw_glosa_no=_safe_str(raw_glosa_no, default=None),
+        raw_amount_clp=_safe_str(raw_amount_clp, default=None),
+        raw_amount_usd=_safe_str(raw_amount_usd, default=None),
+        parser_notes=parser_notes,
+        is_valid=is_valid,
+    )
+
+
 # -----------------------------------------------------------------------------
 # Core orchestration
 # -----------------------------------------------------------------------------
@@ -746,8 +1184,13 @@ def build_chile_logical_model(
     if df_a.empty and df_b.empty:
         log.warning("No tables extracted.")
         return nb
+    
 
     df_all = pd.concat([df_a, df_b], ignore_index=True)
+
+    # Debug: log row counts and page distribution before processing
+    # log.info("df_all rows=%s", len(df_all))
+    # log.info("df_all pages=%s", df_all["pages"].value_counts().to_dict())
 
     # ---- Build header cache once ----
     headers_by_page0 = _build_headers_by_page0(th, pdf_path, config, df_all, log)
@@ -763,49 +1206,115 @@ def build_chile_logical_model(
     current_subtitle: Optional[str] = None
     current_item: Optional[str] = None
 
+    # DEBUG ADDR for row classification counts
+    kind_counts = Counter()
+    created_counts = Counter()  # track how many ministries/units/programs/items/subitems we create
+    created_by_kind = Counter() # track which row kinds are creating the most entities (for debugging)
+
+
     # ---- DEBUG row counter (used for sampled debug logging) ----
     row_i = 0
 
-    for _, row in df_all.iterrows():
-        st_code = _norm_int_str(row.get("sub_titulo"))
-        denom = _safe_str(row.get("denominaciones"), default="").strip()
+    # for row_i, row in df_all.iterrows():
+    for row_i, row in df_all.iterrows():
 
-        amt_clp = _norm_float(row.get("moneda_nacional_miles_de_$CLP"))
-        amt_usd = _norm_float(row.get("moneda_ext_convertida_miles_USD"))
+        # st_code = _norm_int_str(row.get("sub_titulo"))
+        # denom = _safe_str(row.get("denominaciones"), default="").strip()
 
-        parsed = _parse_item_asig(row.get("item_asig"))
+        # amt_clp = _norm_float(row.get("moneda_nacional_miles_de_$CLP"))
+        # amt_usd = _norm_float(row.get("moneda_ext_convertida_miles_USD"))
 
-        # ---- 1) update rolling subtitle context FIRST ----
+        # parsed = _parse_item_asig(row.get("item_asig"))
+        cb_row = _build_canonical_budget_row(
+            row=row,
+            pdf_path=pdf_path,
+            headers_by_page0=headers_by_page0,
+            row_index=int(row_i),
+            current_subtitle=current_subtitle,
+        )
+
+        st_code = cb_row.subtitle_code
+        denom = cb_row.denominaciones or ""
+        amt_clp = cb_row.amount_clp_thousands
+        amt_usd = cb_row.amount_usd_thousands
+        parsed = _parse_item_asig(cb_row.raw_item_asig)
+        kind = cb_row.row_kind
+        page0 = cb_row.source_page_0based
+
+        # BLANK ROW GUARD 
+        # has_denom = bool(denom)
+        # has_amt = (amt_clp is not None) or (amt_usd is not None)
+        # has_code = bool(st_code) or bool(parsed.item2) or bool(parsed.item3)
+
+        # if not has_denom and not has_amt and not has_code:
+        #     continue
+
+        if not cb_row.is_valid and "blank_row" in cb_row.parser_notes:
+            continue
+
+        # ---- 1 update rolling subtitle context FIRST ----
         if st_code:
             current_subtitle = st_code
             current_item = None  # reset item context on subtitle change
 
-        # ---- 2) classify row USING current_subtitle context ----
-        kind = _classify_row(
-            st_code=st_code,
-            parsed=parsed,
-            denom=denom,
-            amt_clp=amt_clp,
-            amt_usd=amt_usd,
-            current_subtitle=current_subtitle,
-        )
+        # ---- 2 classify row USING current_subtitle context ----
+        # kind = _classify_row(
+        #     st_code=st_code,
+        #     parsed=parsed,
+        #     denom=denom,
+        #     amt_clp=amt_clp,
+        #     amt_usd=amt_usd,
+        #     current_subtitle=current_subtitle,
+        # )
+
+        # DEBUG: skip TEXT_CONTINUATION rows for now (they don't drive structure, just add context/details to the last item)
+        if kind == "TEXT_CONTINUATION":
+            continue
+
+        # DEBUG: count classifications
+        kind_counts[kind] += 1
+
+        # DEBUG: log UNKNOWN classifications for visibility (sampled)
+        if kind == "UNKNOWN":
+            log.warning(
+                "UNKNOWN ROW page=%s st=%r parsed=%s denom=%r amt_clp=%r amt_usd=%r",
+                page0,
+                st_code,
+                parsed,
+                denom,
+                amt_clp,
+                amt_usd,
+            )
+
+        # DEBUG: count classifications
+        kind_counts[kind] += 1
+
+        if kind == "SECTION_HEADER":
+            # Optional: track section if you want
+            # current_section = denom_norm.upper()
+            continue
 
         # ---- 3) update rolling item context ----
         if parsed.item2:
             current_item = parsed.item2
 
         # ---- Header-driven hierarchy (fallback to TEMP if headers missing) ----
-        src_page_1 = row.get("source_page")
-        page0 = int(src_page_1) - 1 if src_page_1 is not None else None
+        # src_page_1 = row.get("source_page")
+        # page0 = int(src_page_1) - 1 if src_page_1 is not None else None
 
-        hdr = headers_by_page0.get(page0, {}) if page0 is not None else {}
-        main = (hdr.get("main_header") or {}) if isinstance(hdr, dict) else {}
-        side = (hdr.get("side_header") or {}) if isinstance(hdr, dict) else {}
+        # hdr = headers_by_page0.get(page0, {}) if page0 is not None else {}
+        # main = (hdr.get("main_header") or {}) if isinstance(hdr, dict) else {}
+        # side = (hdr.get("side_header") or {}) if isinstance(hdr, dict) else {}
 
-        ministry_name = _safe_str(main.get("ministry") if isinstance(main, dict) else None, default="TEMP_MINISTRY")
-        partida = _safe_str(side.get("partida") if isinstance(side, dict) else None, default="000")
-        capitulo = _safe_str(side.get("capitulo") if isinstance(side, dict) else None, default="000")
-        programa = _safe_str(side.get("programa") if isinstance(side, dict) else None, default="000")
+        # ministry_name = _safe_str(main.get("ministry") if isinstance(main, dict) else None, default="TEMP_MINISTRY")
+        # partida = _safe_str(side.get("partida") if isinstance(side, dict) else None, default="000")
+        # capitulo = _safe_str(side.get("capitulo") if isinstance(side, dict) else None, default="000")
+        # programa = _safe_str(side.get("programa") if isinstance(side, dict) else None, default="000")
+
+        ministry_name = cb_row.ministry_name or "TEMP_MINISTRY"
+        partida = cb_row.ministry_code or "000"
+        capitulo = cb_row.unit_code or "000"
+        programa = cb_row.program_code or "000"
 
         # ---- DEBUG: log row classification + context (sampled) ----
         # Note: if you haven't implemented _parse_item_asig/_classify_row yet,
@@ -853,23 +1362,101 @@ def build_chile_logical_model(
 
         row_i += 1
 
+        # ministry = _get_or_create_ministry(nb, ministry_name, partida)
+        # unit_name = _safe_str(main.get("service_component"), default=f"CAPITULO_{capitulo}")
+        # unit = _get_or_create_unit(ministry, name=unit_name, code=capitulo)
+
+        # program = _get_or_create_program(unit, name=f"sub_component{programa}", code=programa)
+
         ministry = _get_or_create_ministry(nb, ministry_name, partida)
-        unit_name = _safe_str(main.get("service_component"), default=f"CAPITULO_{capitulo}")
+
+        unit_name = _safe_str(cb_row.service_component, default=f"CAPITULO_{capitulo}")
         unit = _get_or_create_unit(ministry, name=unit_name, code=capitulo)
 
-        program = _get_or_create_program(unit, name=f"sub_component{programa}", code=programa)
+        program_name = _safe_str(cb_row.sub_component, default=f"PROGRAMA_{programa}")
+        program = _get_or_create_program(unit, name=program_name, code=programa)
 
-        subtitle = _get_or_create_subtitle(program, code=current_subtitle, name="")
+        subtitle = None
+        item = None
+        subitem = None
 
-        # Only create subitems when we’re within an item context
-        if current_item:
-            item = _get_or_create_item(subtitle, code=current_item, name="")
-            subitem_name = denom if denom else "UNNAMED_SUBITEM"
-            subitem = _get_or_create_subitem(item, name=subitem_name)
+        # ---------------------------------------------------------
+        # SUBTITLE row
+        # ---------------------------------------------------------
+        if kind == "SUBTITLE_ROLLUP":
+            subtitle_name = denom if denom else ""
+            subtitle = _get_or_create_subtitle(
+                program,
+                code=current_subtitle,
+                name=subtitle_name,
+            )
+            created_counts["subtitle"] += 1
+            created_by_kind[f"subtitle@{kind}"] += 1
 
             if amt_clp is not None:
-                subitem.amount_pesos = (getattr(subitem, "amount_pesos", None) or 0) + amt_clp
+                subtitle.amount_pesos = (getattr(subtitle, "amount_pesos", None) or 0) + amt_clp
             if amt_usd is not None:
-                subitem.amount_usd = (getattr(subitem, "amount_usd", None) or 0) + amt_usd
+                subtitle.amount_usd = (getattr(subtitle, "amount_usd", None) or 0) + amt_usd
+
+        # ---------------------------------------------------------
+        # ITEM row
+        # ---------------------------------------------------------
+        elif kind == "ITEM_2":
+            subtitle = _get_or_create_subtitle(
+                program,
+                code=current_subtitle,
+                name="",
+            )
+            created_counts["subtitle"] += 1
+            created_by_kind[f"subtitle@{kind}"] += 1
+
+            item_name = denom if denom else ""
+            item = _get_or_create_item(
+                subtitle,
+                code=current_item,
+                name=item_name,
+            )
+            created_counts["item"] += 1
+            created_by_kind[f"item@{kind}"] += 1
+
+            if amt_clp is not None:
+                item.amount_pesos = (getattr(item, "amount_pesos", None) or 0) + amt_clp
+            if amt_usd is not None:
+                item.amount_usd = (getattr(item, "amount_usd", None) or 0) + amt_usd
+
+        # ---------------------------------------------------------
+        # SUBITEM row
+        # ---------------------------------------------------------
+        elif kind == "SUBITEM_3":
+            subtitle = _get_or_create_subtitle(
+                program,
+                code=current_subtitle,
+                name="",
+            )
+            created_counts["subtitle"] += 1
+            created_by_kind[f"subtitle@{kind}"] += 1
+
+            if current_item:
+                item = _get_or_create_item(
+                    subtitle,
+                    code=current_item,
+                    name="",
+                )
+                created_counts["item"] += 1
+                created_by_kind[f"item@{kind}"] += 1
+
+                subitem_name = denom if denom else "UNNAMED_SUBITEM"
+                subitem = _get_or_create_subitem(item, name=subitem_name)
+                created_counts["subitem"] += 1
+                created_by_kind[f"subitem@{kind}"] += 1
+
+                if amt_clp is not None:
+                    subitem.amount_pesos = (getattr(subitem, "amount_pesos", None) or 0) + amt_clp
+                if amt_usd is not None:
+                    subitem.amount_usd = (getattr(subitem, "amount_usd", None) or 0) + amt_usd
+
+    # DEBUG: log final classification counts
+    log.info("GLOBAL KIND COUNTS: %s", dict(kind_counts))
+    log.info("CREATED BY KIND: %s", dict(created_by_kind))
 
     return nb
